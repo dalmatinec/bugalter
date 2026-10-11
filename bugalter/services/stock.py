@@ -70,7 +70,7 @@ async def create_product(
     if not sku or " " in sku or len(sku) > 64:
         raise ValidationError("Артикул — одно слово до 64 символов")
     await reference.get_unit(session, unit_code)
-    if await get_product(session, sku, required=False):
+    if (await session.execute(select(Product.id).where(Product.sku == sku))).first():
         raise ValidationError(f"Товар {sku} уже есть")
     product = Product(sku=sku, name=name.strip() or sku, base_unit=unit_code, category=category)
     session.add(product)
@@ -100,7 +100,7 @@ async def add_product_unit(session: AsyncSession, actor, product: Product, unit_
 
 
 async def get_product(session: AsyncSession, sku: str, required: bool = True) -> Product | None:
-    product = (await session.execute(select(Product).where(Product.sku == sku.strip().lower()))).scalar_one_or_none()
+    product = await org.lookup(session, Product, Product.sku, Product.name, sku)
     if product is None and required:
         raise NotFound(f"Нет товара «{sku}». Список: /products")
     return product

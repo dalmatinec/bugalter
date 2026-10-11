@@ -51,8 +51,10 @@ def test_rounding_example_from_design():
 
 
 def test_fmt_money():
-    assert fmt_money(D("23670"), "USD") == "23 670,00 USD"
-    assert fmt_money(D("-144"), "USD") == "−144,00 USD"
+    assert fmt_money(D("23670"), "USD") == "$23 670,00"
+    assert fmt_money(D("-144"), "USD") == "−$144,00"
+    assert fmt_money(D("1500"), "RUB") == "1 500,00 ₽"
+    assert fmt_money(D("10"), "XYZ") == "10,00 XYZ"
 
 
 def test_semi_monthly_bounds():

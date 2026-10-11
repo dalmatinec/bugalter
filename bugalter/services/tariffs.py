@@ -36,7 +36,7 @@ async def create_work_type(
     if calc_method not in CALC_METHODS:
         raise ValidationError("Метод расчёта: " + ", ".join(f"{k} ({v})" for k, v in CALC_METHODS.items()))
     await reference.get_unit(session, unit_code)
-    if await get_work_type(session, code, required=False):
+    if (await session.execute(select(WorkType.id).where(WorkType.code == code))).first():
         raise ValidationError(f"Вид работ {code} уже есть")
     wt = WorkType(
         code=code, name=name.strip() or code, unit_code=unit_code, calc_method=calc_method, created_by=actor.user.id
@@ -55,7 +55,9 @@ async def create_work_type(
 
 
 async def get_work_type(session: AsyncSession, code: str, required: bool = True) -> WorkType | None:
-    wt = (await session.execute(select(WorkType).where(WorkType.code == code.strip().lower()))).scalar_one_or_none()
+    from .org import lookup
+
+    wt = await lookup(session, WorkType, WorkType.code, WorkType.name, code)
     if wt is None and required:
         raise NotFound(f"Нет вида работ «{code}». Список: /wt")
     return wt
@@ -228,7 +230,7 @@ async def resolve_tariff(
 async def tariff_history(session: AsyncSession, work_type_id: int) -> list[tuple[Tariff, str | None, str | None]]:
     rows = (
         await session.execute(
-            select(Tariff, Department.code, Employee.code)
+            select(Tariff, Department.name, Employee.full_name)
             .outerjoin(Department, Department.id == Tariff.department_id)
             .outerjoin(Employee, Employee.id == Tariff.employee_id)
             .where(Tariff.work_type_id == work_type_id)
@@ -290,8 +292,8 @@ def split_by_tiers(
 async def create_coefficient(session: AsyncSession, actor, code: str, factor: Decimal, name: str) -> Coefficient:
     actor.require(Perm.TARIFF_MANAGE)
     code = code.strip().lower().lstrip("*")
-    if not code or " " in code or len(code) > 32:
-        raise ValidationError("Код коэффициента — одно слово до 32 символов")
+    if not code or " " in code or len(code) > 20:
+        raise ValidationError("Код коэффициента — одно слово до 20 символов")
     if factor <= 0 or scale_of(factor) > 4:
         raise ValidationError("Коэффициент — положительное число, не больше 4 знаков после запятой")
     if await session.get(Coefficient, code) is not None:
@@ -330,3 +332,25 @@ async def resolve_coefficients(session: AsyncSession, codes: list[str] | None) -
         factor *= coef.factor
         used.append(code)
     return factor, used
+
+
+async def current_rates(
+    session: AsyncSession, work_type_id: int, today: dt.date
+) -> list[tuple[Tariff, str | None, str | None, list[tuple[Decimal, Decimal]], bool]]:
+    """Действующая ставка по каждой области (общая / подразделение / сотрудник) и будущие ставки.
+
+    Возвращает (тариф, подразделение, сотрудник, ступени, будущая_ли).
+    """
+    rows = await tariff_history(session, work_type_id)
+    seen: set[tuple] = set()
+    result = []
+    for tariff, dept_name, emp_name in rows:
+        scope = (tariff.department_id, tariff.employee_id)
+        if tariff.valid_from > today:
+            result.append((tariff, dept_name, emp_name, await tiers_of(session, tariff.id), True))
+            continue
+        if scope in seen:
+            continue
+        seen.add(scope)
+        result.append((tariff, dept_name, emp_name, await tiers_of(session, tariff.id), False))
+    return result

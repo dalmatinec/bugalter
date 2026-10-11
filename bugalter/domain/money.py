@@ -110,8 +110,29 @@ def fmt_number(value: Decimal, places: int | None = None) -> str:
     return sign + result
 
 
+CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "RUB": "₽", "KZT": "₸", "UZS": "сум", "KGS": "сом", "GBP": "£"}
+_PREFIX_SYMBOLS = {"USD", "EUR", "GBP"}
+
+
+def currency_label(code: str | None) -> str:
+    return CURRENCY_SYMBOLS.get(code or "", code or "")
+
+
 def fmt_money(value: Decimal, currency: str, minor_units: int = 2) -> str:
-    return f"{fmt_number(value, minor_units)} {currency}"
+    """$1 200,00 · 1 200,00 ₽ · 1 200,00 KZT"""
+    number = fmt_number(abs(value), minor_units)
+    sign = "−" if value < 0 else ""
+    if currency in _PREFIX_SYMBOLS:
+        return f"{sign}{CURRENCY_SYMBOLS[currency]}{number}"
+    return f"{sign}{number} {currency_label(currency)}"
+
+
+def fmt_price(value: Decimal, currency: str | None) -> str:
+    """Ставка/цена без лишних нулей: $400, $6,5, 3,25 ₽."""
+    number = fmt_number(value)
+    if currency in _PREFIX_SYMBOLS:
+        return f"{CURRENCY_SYMBOLS[currency]}{number}"
+    return f"{number} {currency_label(currency)}".strip()
 
 
 def fmt_signed_money(value: Decimal, currency: str, minor_units: int = 2) -> str:

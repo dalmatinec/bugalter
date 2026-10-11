@@ -59,14 +59,15 @@ class ContextMiddleware(BaseMiddleware):
                 async with session.begin():
                     actor = await access.load_actor(session, tg_user.id, tg_user.username, tg_user.full_name)
                     settings = await get_settings(session)
-                    chat_dept = None
+                    chat_dept = chat_employee = None
                     if chat is not None and chat.type != ChatType.PRIVATE:
-                        chat_dept = await org.chat_department(session, chat.id)
+                        chat_dept, chat_employee = await org.chat_binding(session, chat.id)
                     data.update(
                         session=session,
                         actor=actor,
                         settings=settings,
                         chat_dept=chat_dept,
+                        chat_employee=chat_employee,
                         notifier=notifier,
                         config=self.config,
                         sessionmaker=self.sessionmaker,

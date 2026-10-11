@@ -10,7 +10,7 @@ from sqlalchemy import select
 from ...db.models import AuditLog, Role
 from ...domain.dates import parse_date
 from ...domain.errors import AccessDenied, ValidationError
-from ...domain.money import fmt_number, parse_decimal
+from ...domain.money import fmt_money, fmt_number, parse_decimal
 from ...domain.permissions import PERM_TITLES, Perm
 from ...services import access, org, payroll, reference, tariffs, work
 from ...services import settings as settings_service
@@ -20,12 +20,12 @@ from ..ui import h
 
 router = Router(name="admin")
 
-ADMIN_HELP = """<b>Администрирование</b>
+ADMIN_HELP = """<b>Текстовые команды</b> (всё то же есть в /admin кнопками)
 <u>Структура</u>
 /dept_add &lt;код&gt; &lt;название&gt; · /depts
 /emp_add &lt;код&gt; &lt;ФИО&gt; · /emps · /emp_link &lt;код&gt; &lt;tg_id|@username&gt;
 /emp_dept &lt;код&gt; &lt;подразделение&gt; · /emp_undept &lt;код&gt; &lt;подразделение&gt; · /emp_off · /emp_on
-/bind &lt;подразделение&gt; — привязать рабочую группу (команда в группе) · /unbind
+/bind [подразделение] [сотрудник] — привязать рабочую группу (в группе; без аргументов — кнопками) · /unbind
 <u>Доступ</u>
 /roles · /role_add &lt;код&gt; &lt;право,право&gt; &lt;название&gt; (владелец) · /perms
 /grant &lt;tg_id|@username&gt; &lt;роль&gt; [подразделение|*] · /grants [tg_id|@username] · /revoke &lt;№&gt;
@@ -46,11 +46,6 @@ ADMIN_HELP = """<b>Администрирование</b>
 def _private(is_private: bool) -> None:
     if not is_private:
         raise ValidationError("Эта команда выполняется только в личном чате с ботом")
-
-
-@router.message(Command("admin"))
-async def admin_help(message: Message, notifier):
-    notifier.answer(message, ADMIN_HELP)
 
 
 # ------------------------------------------------------------------ структура
@@ -131,21 +126,6 @@ async def emp_active(message: Message, command: CommandObject, session, actor, n
     emp = await org.get_employee(session, items[0])
     await org.set_employee_active(session, actor, emp, command.command == "emp_on")
     notifier.answer(message, f"✅ {h(emp.full_name)}: {'активен' if emp.is_active else 'уволен (история сохранена)'}")
-
-
-@router.message(Command("bind"))
-async def bind(message: Message, command: CommandObject, session, actor, notifier, is_private):
-    if is_private:
-        raise ValidationError("Команду /bind нужно выполнить в рабочей группе")
-    items = tokens(command.args)
-    need(items, 1, "/bind <код подразделения>")
-    dept = await org.get_department(session, items[0])
-    await org.bind_chat(session, actor, message.chat.id, message.chat.title or "", dept)
-    notifier.answer(
-        message,
-        f"✅ Группа привязана к подразделению <b>{h(dept.name)}</b>. "
-        "Здесь вводятся операции и складские движения; суммы и зарплаты — только в личке с ботом.",
-    )
 
 
 @router.message(Command("unbind"))
@@ -494,7 +474,7 @@ async def credit(message: Message, command: CommandObject, session, actor, setti
     row = await payroll.set_credit_limit(session, actor, settings, emp, amount, currency)
     notifier.answer(
         message,
-        f"✅ {h(emp.full_name)}: аванс в долг до {fmt_number(row.amount, 2)} {row.currency}. "
+        f"✅ {h(emp.full_name)}: аванс в долг до {fmt_money(row.amount, row.currency)}. "
         "Долг гасится из следующих начислений автоматически.",
     )
 
@@ -505,7 +485,7 @@ async def credits(message: Message, session, actor, settings, notifier, is_priva
     if not actor.can_anywhere(Perm.PAYROLL_SIGN):
         raise AccessDenied("Недостаточно прав")
     rows = await payroll.list_credit_limits(session)
-    lines = [f"По умолчанию: {fmt_number(settings.default_credit_limit, 2)} (настройка default_credit_limit)"]
+    lines = [f"По умолчанию: {fmt_money(settings.default_credit_limit, settings.currency)}"]
     for limit, emp in rows:
-        lines.append(f"• {h(emp.full_name)} ({h(emp.code)}): {fmt_number(limit.amount, 2)} {limit.currency}")
+        lines.append(f"• {h(emp.full_name)} ({h(emp.code)}): {fmt_money(limit.amount, limit.currency)}")
     notifier.answer(message, "\n".join(lines))

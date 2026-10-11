@@ -120,17 +120,35 @@ class AccessGrant(Base):
 
 
 class TelegramChat(Base):
-    """Рабочая группа, привязанная к подразделению."""
+    """Рабочая группа: общая группа подразделения или личная группа сотрудника (employee_id задан)."""
 
     __tablename__ = "telegram_chats"
-    __table_args__ = (Index("ix_telegram_chats_dept", "department_id", postgresql_where=text("is_active")),)
+    __table_args__ = (
+        Index("ix_telegram_chats_dept", "department_id", postgresql_where=text("is_active")),
+        Index("ix_telegram_chats_employee", "employee_id", postgresql_where=text("employee_id IS NOT NULL")),
+    )
 
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     title: Mapped[str] = mapped_column(String(256), default="", nullable=False)
     department_id: Mapped[int] = mapped_column(ForeignKey("departments.id"), nullable=False)
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     bound_by: Mapped[int | None] = _user_fk()
     bound_at: Mapped[dt.datetime] = _now_col()
+
+
+class EmployeeInvite(Base):
+    """Ссылка-приглашение: сотрудник открывает t.me/<бот>?start=inv_<token> и привязывается к карточке."""
+
+    __tablename__ = "employee_invites"
+
+    token: Mapped[str] = mapped_column(String(40), primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
+    created_by: Mapped[int | None] = _user_fk()
+    created_at: Mapped[dt.datetime] = _now_col()
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    used_by: Mapped[int | None] = _user_fk()
 
 
 # ---------------------------------------------------------------- справочники и настройки

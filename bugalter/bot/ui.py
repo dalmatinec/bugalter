@@ -33,17 +33,18 @@ BTN_MY_STOCK = "📦 Товар на руках"
 BTN_REQUEST = "💸 Запросить выплату"
 BTN_MY_PAYOUTS = "🧾 Мои выплаты"
 BTN_HELP = "❓ Помощь"
+BTN_PANEL = "⚙️ Управление"
 
 
-def main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_MY_WORK), KeyboardButton(text=BTN_MY_SALARY)],
-            [KeyboardButton(text=BTN_MY_STOCK), KeyboardButton(text=BTN_REQUEST)],
-            [KeyboardButton(text=BTN_MY_PAYOUTS), KeyboardButton(text=BTN_HELP)],
-        ],
-        resize_keyboard=True,
-    )
+def main_menu(admin: bool = False) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text=BTN_MY_WORK), KeyboardButton(text=BTN_MY_SALARY)],
+        [KeyboardButton(text=BTN_MY_STOCK), KeyboardButton(text=BTN_REQUEST)],
+        [KeyboardButton(text=BTN_MY_PAYOUTS), KeyboardButton(text=BTN_HELP)],
+    ]
+    if admin:
+        rows.insert(0, [KeyboardButton(text=BTN_PANEL)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 async def minor_units(session: AsyncSession, code: str) -> int:

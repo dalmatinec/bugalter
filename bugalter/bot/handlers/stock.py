@@ -6,7 +6,7 @@ from aiogram.types import CallbackQuery, Message
 
 from ...db.models import Employee, Location, Product, StockDocument, User
 from ...domain.errors import AccessDenied, ValidationError
-from ...domain.money import fmt_number, fmt_qty, parse_decimal
+from ...domain.money import fmt_money, fmt_number, fmt_price, fmt_qty, parse_decimal
 from ...domain.permissions import Perm
 from ...services import access, org, reference, stock
 from .. import ui
@@ -361,7 +361,7 @@ async def stock_balances(
             lines.append(f"\n<u>{h(current)}</u>")
         line = f"• {h(row.product.name)}: {fmt_qty(row.qty, row.product.base_unit)}"
         if show_value and row.value is not None:
-            line += f" · {fmt_number(row.value, 2)} {row.currency}"
+            line += f" · {fmt_money(row.value, row.currency)}"
             if row.unvalued_qty:
                 line += f" (+{fmt_qty(row.unvalued_qty, row.product.base_unit)} без цены)"
         lines.append(line)
@@ -383,7 +383,7 @@ async def batches(message: Message, command: CommandObject, session, actor, noti
     lines = [f"📦 <b>Партии: {h(product.name)}</b> (новые сверху, списание по FIFO — со старых)"]
     for batch, remaining in rows:
         cost = (
-            f"{fmt_number(batch.unit_cost)} {batch.currency}/{product.base_unit}"
+            f"{fmt_price(batch.unit_cost, batch.currency)}/{product.base_unit}"
             if batch.unit_cost is not None
             else "без цены"
         )

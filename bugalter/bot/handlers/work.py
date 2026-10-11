@@ -69,17 +69,26 @@ async def op_command(
     notifier,
     is_private,
     sessionmaker,
+    chat_employee=None,
 ):
     ex = extract(tokens(command.args))
     dept = await resolve_department(session, actor, chat_dept, ex.dept, Perm.WORK_CREATE)
     actor.require(Perm.WORK_CREATE, dept.id)
     if ex.rest:
-        await _quick_op(message, ex.rest, dept, session, actor, settings, notifier, is_private, sessionmaker)
+        items = ex.rest
+        # В личной группе сотрудника его код можно не писать: /op доставка 3
+        if chat_employee is not None and await org.get_employee(session, items[0], required=False) is None:
+            items = [chat_employee.code, *items]
+        await _quick_op(message, items, dept, session, actor, settings, notifier, is_private, sessionmaker)
+        return
+    await state.clear()
+    if chat_employee is not None:
+        await state.update_data(dept_id=dept.id, key=f"wiz:{uuid.uuid4().hex}")
+        await _ask_work_type(notifier, message, None, state, session, chat_employee)
         return
     employees = await org.department_employees(session, dept.id)
     if not employees:
-        raise ValidationError(f"В подразделении {dept.code} нет сотрудников: /emp_dept <код> {dept.code}")
-    await state.clear()
+        raise ValidationError(f"В подразделении «{dept.name}» нет сотрудников — добавьте их в /admin → Сотрудники")
     await state.set_state(OpWizard.employee)
     await state.update_data(dept_id=dept.id, key=f"wiz:{uuid.uuid4().hex}")
     kb = InlineKeyboardBuilder()
@@ -125,10 +134,14 @@ async def _quick_op(message, items, dept, session, actor, settings, notifier, is
 @router.callback_query(OpWizard.employee, F.data.startswith("opw:e:"))
 async def wiz_employee(callback: CallbackQuery, state: FSMContext, session, notifier):
     emp = await session.get(Employee, int(callback.data.split(":")[2]))
+    await _ask_work_type(notifier, None, callback, state, session, emp)
+
+
+async def _ask_work_type(notifier, message, callback, state: FSMContext, session, emp: Employee):
     data = await state.get_data()
     wts = await tariffs.work_types_for_department(session, data["dept_id"])
     if not wts:
-        raise ValidationError("Нет доступных видов работ: /wt_add")
+        raise ValidationError("Нет доступных видов работ — добавьте их в /admin → Работы и ставки")
     await state.update_data(employee_id=emp.id)
     await state.set_state(OpWizard.work_type)
     kb = InlineKeyboardBuilder()
@@ -136,7 +149,11 @@ async def wiz_employee(callback: CallbackQuery, state: FSMContext, session, noti
         kb.button(text=wt.name, callback_data=f"opw:t:{wt.id}")
     kb.button(text="✖️ Отмена", callback_data="opw:x")
     kb.adjust(2)
-    notifier.edit(callback.message, f"👤 {h(emp.full_name)}\nКакая работа?", kb.as_markup())
+    text = f"🧾 Новая операция · 👤 {h(emp.full_name)}\nКакая работа?"
+    if callback is not None:
+        notifier.edit(callback.message, text, kb.as_markup())
+    else:
+        notifier.answer(message, text, kb.as_markup())
 
 
 @router.callback_query(OpWizard.work_type, F.data.startswith("opw:t:"))

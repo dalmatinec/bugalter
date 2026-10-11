@@ -23,3 +23,4 @@ pythonpath = ["."]
 # Справочные тексты команд удобнее держать одной строкой на команду.
 "bugalter/bot/handlers/admin.py" = ["E501"]
 "bugalter/bot/handlers/common.py" = ["E501"]
+"bugalter/bot/handlers/panel.py" = ["E501"]

@@ -9,15 +9,11 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendDocument, SendMessage
+from aiogram.methods import AnswerCallbackQuery, EditMessageText, GetMe, SendDocument, SendMessage
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from sqlalchemy import func, select
 
-from bugalter.bot.app import bootstrap, build_dispatcher
-from bugalter.bot.handlers import admin, common, me, work
-from bugalter.bot.handlers import payroll as payroll_h
-from bugalter.bot.handlers import reports as reports_h
-from bugalter.bot.handlers import stock as stock_h
+from bugalter.bot.app import ROUTERS, bootstrap, build_dispatcher
 from bugalter.config import Config
 from bugalter.db.models import Adjustment, Employee, Payout, StockDocument, WorkEntry, WorkType
 from bugalter.services import ledger, stock
@@ -42,6 +38,8 @@ class FakeSession(BaseSession):
                 chat=Chat(id=int(method.chat_id), type=chat_type),
                 text=getattr(method, "text", None),
             )
+        if isinstance(method, GetMe):
+            return User(id=42, is_bot=True, first_name="Бухгалтер", username="bugalter_test_bot")
         return True
 
     async def close(self):
@@ -74,15 +72,7 @@ class Harness:
         self.bot = Bot("42:TEST", session=self.tg, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.config = Config(BOT_TOKEN="42:TEST", OWNER_TELEGRAM_IDS="1")
         # Роутеры — модульные объекты и подключаются к диспетчеру один раз; в тестах диспетчер свой на каждый тест.
-        for router in (
-            common.router,
-            work.router,
-            me.router,
-            admin.router,
-            stock_h.router,
-            payroll_h.router,
-            reports_h.router,
-        ):
+        for router in ROUTERS:
             router._parent_router = None
         self.dp = build_dispatcher(sessionmaker, self.config)
         self.ids = itertools.count(1)
@@ -151,7 +141,7 @@ async def setup_company(h: Harness):
     out = texts(await h.say(OWNER, "/grant 30 operator north"))
     assert "Выдача" in out, out
     out = texts(await h.say(OWNER, "/bind north", GROUP))
-    assert "привязана" in out, out
+    assert "подключена" in out, out
 
 
 async def test_full_operation_flow(h, session):
@@ -160,7 +150,7 @@ async def test_full_operation_flow(h, session):
     out = await h.say(OPERATOR, "/op ivan доставка 3 #A-1052 срочно", GROUP)
     card = texts(out)
     assert "ОП-000001" in card and "ожидает подтверждения" in card
-    assert "USD" not in card  # суммы в группе не показываются
+    assert "$" not in card  # суммы в группе не показываются
     entry = (await session.execute(select(WorkEntry))).scalar_one()
     assert entry.order_ref == "A-1052" and entry.comment == "срочно" and entry.message_id is not None
 
@@ -190,7 +180,7 @@ async def test_full_operation_flow(h, session):
 
     # Иван смотрит расчёт в личке — суммы видны
     out = texts(await h.say(IVAN, "💰 Мой расчёт"))
-    assert "1 200,00 USD" in out and "Доставка" in out
+    assert "$1 200,00" in out and "Доставка" in out
 
     # В группе личные данные не показываются
     out = texts(await h.say(IVAN, "/my_salary", GROUP))
@@ -325,11 +315,11 @@ async def test_new_pricing_and_stock_commands(h, session):
     out = texts(await h.say(OPERATOR, "/receive coffee 40 уп cost=1.5", GROUP))
     assert "⚠️" not in out, out
     out = texts(await h.say(OWNER, "/batches coffee"))
-    assert "6 USD/кг" in out and "осталось 10 кг" in out
+    assert "$6/кг" in out and "осталось 10 кг" in out
     out = texts(await h.say(OWNER, "/stock @north"))
-    assert "60,00 USD" in out
+    assert "$60,00" in out
     # в группе себестоимость не видна
-    assert "USD" not in texts(await h.say(OPERATOR, "/stock", GROUP))
+    assert "$" not in texts(await h.say(OPERATOR, "/stock", GROUP))
 
     await h.say(OPERATOR, "/issue ivan coffee 4", GROUP)
     doc = (await session.execute(select(StockDocument).where(StockDocument.doc_type == "issue"))).scalar_one()
@@ -345,3 +335,95 @@ async def test_new_pricing_and_stock_commands(h, session):
     # аванс в долг в пределах лимита
     out = texts(await h.say(OWNER, f"/payout ivan {int(entry.amount) + 500} аванс"))
     assert "ожидает подтверждения" in out, out
+
+
+async def test_admin_panel_setup_from_scratch(h, session):
+    """Вся первичная настройка — кнопками панели, без кодов и текстовых команд."""
+    import re
+
+    from aiogram.types import ChatMemberLeft, ChatMemberMember, ChatMemberUpdated
+
+    from bugalter.db.models import Department, Tariff, TariffTier, TelegramChat
+
+    out = texts(await h.say(OWNER, "/start"))
+    assert "Управление" in out
+    assert "С чего начать" in texts(await h.say(OWNER, "⚙️ Управление"))
+
+    await h.press(OWNER, "p:d:add")
+    assert "создано" in texts(await h.say(OWNER, "Север"))
+    dept = (await session.execute(select(Department))).scalar_one()
+    assert dept.code == "sever"
+
+    await h.press(OWNER, f"p:e:add:{dept.id}")
+    out = texts(await h.say(OWNER, "Иван Иванов"))
+    link = re.search(r"https://t.me/bugalter_test_bot\?start=(inv_[\w-]+)", out)
+    assert link, out
+    emp = (await session.execute(select(Employee))).scalar_one()
+    assert emp.code == "ivan" and emp.user_id is None
+
+    # Сотрудник открывает ссылку
+    out = texts(await h.say(IVAN, f"/start {link.group(1)}"))
+    assert "Вы подключены как" in out
+    await session.refresh(emp)
+    assert emp.user_id is not None
+    assert "Ссылка-приглашение недействительна" in texts(await h.say(IVAN, f"/start {link.group(1)}"))
+
+    # Вид работ и ставка со ступенями — кнопками
+    await h.press(OWNER, "p:w:add")
+    await h.say(OWNER, "Доставка")
+    await h.press(OWNER, "p:w:u:заказ")
+    out = texts(await h.press(OWNER, "p:w:m:per_unit"))
+    assert "для кого" in out
+    wt = (await session.execute(select(WorkType))).scalar_one()
+    await h.press(OWNER, f"p:w:s:{wt.id}:{dept.id}")
+    out = texts(await h.say(OWNER, "400 10:450"))
+    assert "Ставка сохранена" in out and "$400" in out and "сверх 10 — $450" in out
+    tariff = (await session.execute(select(Tariff))).scalar_one()
+    assert tariff.department_id == dept.id and tariff.currency == "USD"
+    assert (await session.execute(select(TariffTier))).scalar_one().threshold == Decimal(10)
+
+    # Роль сотруднику
+    await h.press(OWNER, f"p:e:role:{emp.id}")
+    await h.press(OWNER, f"p:e:rl:{emp.user_id}:operator")
+    out = await h.press(OWNER, f"p:a:rg:{emp.user_id}:operator:{dept.id}")
+    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "Оператор" in c.text for c in out)
+
+    # Коэффициент и настройки
+    await h.press(OWNER, "p:c:add")
+    assert "*срочно" in texts(await h.say(OWNER, "срочно 1.5"))
+    out = texts(await h.press(OWNER, "p:s:t:group_show_amounts"))
+    assert "Суммы в рабочих группах: <b>да</b>" in out
+    await h.press(OWNER, "p:s:t:group_show_amounts")
+    out = texts(await h.press(OWNER, "p:s:v:deduction_limit_percent:20"))
+    assert "20 % от начислений" in out
+
+    # Бота добавили в группу — он сам спрашивает, чья это группа
+    bot_user = User(id=42, is_bot=True, first_name="bot")
+    event = ChatMemberUpdated(
+        chat=h._chat(GROUP),
+        from_user=h._user(OWNER),
+        date=dt.datetime.now(dt.UTC),
+        old_chat_member=ChatMemberLeft(user=bot_user),
+        new_chat_member=ChatMemberMember(user=bot_user),
+    )
+    mark = len(h.tg.calls)
+    await h.dp.feed_update(h.bot, Update(update_id=next(h.ids), my_chat_member=event))
+    assert "К какому подразделению" in texts(h.tg.calls[mark:])
+    await h.press(OWNER, f"g:b:{dept.id}", GROUP)
+    out = texts(await h.press(OWNER, f"g:e:{dept.id}:{emp.id}", GROUP))
+    assert "группа сотрудника" in out
+    chat = await session.get(TelegramChat, GROUP)
+    assert chat.employee_id == emp.id
+
+    # В личной группе сотрудника его код не нужен
+    await h.say(OWNER, f"/grant {OPERATOR} operator sever")
+    out = texts(await h.say(OPERATOR, "/op доставка 3 #Z-1", GROUP))
+    assert "Иван Иванов" in out and "ожидает подтверждения" in out
+    out = texts(await h.say(OPERATOR, "/op", GROUP))
+    assert "Какая работа?" in out and "Иван Иванов" in out
+
+    # Товар — кнопками
+    await h.press(OWNER, "p:pr:add")
+    await h.say(OWNER, "Кофе зерно")
+    out = texts(await h.press(OWNER, "p:pr:u:кг"))
+    assert "Кофе зерно" in out and "kofe" in out

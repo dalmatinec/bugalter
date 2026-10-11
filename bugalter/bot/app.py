@@ -14,7 +14,7 @@ from ..config import Config, get_config
 from ..db.session import make_engine, make_sessionmaker
 from ..logs import setup_logging
 from ..services import access, reference
-from .handlers import admin, common, me, payroll, reports, stock, work
+from .handlers import admin, common, me, panel, payroll, reports, stock, work
 from .middlewares import ContextMiddleware
 from .storage import PostgresStorage
 
@@ -27,8 +27,8 @@ PRIVATE_COMMANDS = [
     ("my_stock", "Товар на руках"),
     ("request_payout", "Запросить выплату"),
     ("my_payouts", "Мои выплаты"),
+    ("admin", "Управление"),
     ("help", "Справка"),
-    ("admin", "Администрирование"),
 ]
 GROUP_COMMANDS = [
     ("op", "Внести операцию"),
@@ -40,13 +40,26 @@ GROUP_COMMANDS = [
 ]
 
 
+# Порядок важен: ответы на вопросы панели и мастера ввода проверяются раньше общих текстовых кнопок.
+ROUTERS = (
+    common.router,
+    panel.router,
+    work.router,
+    me.router,
+    admin.router,
+    stock.router,
+    payroll.router,
+    reports.router,
+)
+
+
 def build_dispatcher(sessionmaker: async_sessionmaker[AsyncSession], config: Config) -> Dispatcher:
     dp = Dispatcher(storage=PostgresStorage(sessionmaker))
     middleware = ContextMiddleware(sessionmaker, config)
     dp.message.middleware(middleware)
     dp.callback_query.middleware(middleware)
-    # Порядок важен: состояние мастера ввода (work, me) проверяется раньше общих текстовых кнопок.
-    for router in (common.router, work.router, me.router, admin.router, stock.router, payroll.router, reports.router):
+    dp.my_chat_member.middleware(middleware)
+    for router in ROUTERS:
         dp.include_router(router)
     return dp
 

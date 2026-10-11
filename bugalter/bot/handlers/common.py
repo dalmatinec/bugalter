@@ -1,5 +1,5 @@
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
@@ -37,21 +37,27 @@ HELP_MANAGER = """<b>Деньги</b> (только в личке)
 
 
 @router.message(CommandStart())
-async def start(message: Message, actor, is_private: bool, notifier):
+async def start(message: Message, command: CommandObject, session, actor, is_private: bool, notifier):
+    from .panel import accept_invite_start, can_admin
+
     if not is_private:
         notifier.answer(message, "Я работаю в этой группе. Команды: /help")
         return
+    if command.args and command.args.startswith("inv_"):
+        await accept_invite_start(message, command.args[4:], session, actor, notifier)
+        return
+    admin = can_admin(actor)
     lines = [f"Здравствуйте, {h(message.from_user.full_name)}!"]
     if actor.employee:
-        lines.append(f"Вы — сотрудник <b>{h(actor.employee.full_name)}</b> (код {h(actor.employee.code)}).")
-    else:
+        lines.append(f"Вы — сотрудник <b>{h(actor.employee.full_name)}</b>.")
+    elif not admin:
         lines.append(
             f"Ваш Telegram ID: <code>{message.from_user.id}</code>. "
-            "Передайте его администратору, чтобы он привязал вас к карточке сотрудника."
+            "Попросите у руководителя ссылку-приглашение — по ней бот привяжет вас автоматически."
         )
-    if actor.grants:
-        lines.append("Ваши роли: " + ", ".join(sorted({g.role_code for g in actor.grants})) + ". Справка: /help")
-    notifier.answer(message, "\n".join(lines), ui.main_menu())
+    if admin:
+        lines.append("Настройка — кнопка «⚙️ Управление» внизу.")
+    notifier.answer(message, "\n".join(lines), ui.main_menu(admin))
 
 
 @router.message(Command("help"))

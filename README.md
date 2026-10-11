@@ -24,7 +24,7 @@ cp .env.example .env && nano .env        # BOT_TOKEN, OWNER_TELEGRAM_IDS, POSTGR
 docker compose up -d --build
 docker compose logs -f bot               # ждём "bot_started"
 ```
-Дальше — первичная настройка в личке с ботом: [docs/DEPLOY.md, шаг 7](docs/DEPLOY.md#7-первичная-настройка-в-telegram).
+Дальше — в личке с ботом `/start` → **⚙️ Управление**: подразделения, сотрудники (по ссылке-приглашению), работы и ставки, роли, группы — всё кнопками. Подробно: [docs/DEPLOY.md, шаг 7](docs/DEPLOY.md#7-первичная-настройка-в-telegram).
 
 Обновление: `sh scripts/update.sh`. Разовая копия базы: `docker compose run --rm backup once`.
 Восстановление: `sh scripts/restore.sh backups/<файл>.dump`.
