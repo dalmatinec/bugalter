@@ -1,0 +1,25 @@
+[project]
+name = "bugalter"
+version = "0.1.0"
+description = "Telegram-бот внутреннего учёта: операции, склад, сдельная оплата, выплаты"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff.lint.per-file-ignores]
+"migrations/versions/*" = ["E501"]
+# Справочные тексты команд удобнее держать одной строкой на команду.
+"bugalter/bot/handlers/admin.py" = ["E501"]
+"bugalter/bot/handlers/common.py" = ["E501"]

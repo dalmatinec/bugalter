@@ -1,0 +1,284 @@
+"""Тексты карточек и клавиатуры."""
+
+from html import escape
+
+from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..db.models import (
+    Adjustment,
+    Currency,
+    Department,
+    Employee,
+    Payout,
+    PayoutRequest,
+    StockDocument,
+    User,
+    WorkEntry,
+    WorkType,
+)
+from ..domain.money import fmt_money, fmt_number, fmt_qty, fmt_signed_money
+from ..services import payroll, stock
+from ..services.work import STATUS_TITLES
+
+h = escape
+
+STATUS_ICONS = {"draft": "📝", "pending": "⏳", "confirmed": "✅", "rejected": "❌", "cancelled": "🚫"}
+
+BTN_MY_WORK = "📊 Моя работа"
+BTN_MY_SALARY = "💰 Мой расчёт"
+BTN_MY_STOCK = "📦 Товар на руках"
+BTN_REQUEST = "💸 Запросить выплату"
+BTN_MY_PAYOUTS = "🧾 Мои выплаты"
+BTN_HELP = "❓ Помощь"
+
+
+def main_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_MY_WORK), KeyboardButton(text=BTN_MY_SALARY)],
+            [KeyboardButton(text=BTN_MY_STOCK), KeyboardButton(text=BTN_REQUEST)],
+            [KeyboardButton(text=BTN_MY_PAYOUTS), KeyboardButton(text=BTN_HELP)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+async def minor_units(session: AsyncSession, code: str) -> int:
+    cur = await session.get(Currency, code)
+    return cur.minor_units if cur else 2
+
+
+async def money(session: AsyncSession, amount, code: str, signed: bool = False) -> str:
+    places = await minor_units(session, code)
+    return fmt_signed_money(amount, code, places) if signed else fmt_money(amount, code, places)
+
+
+async def user_name(session: AsyncSession, user_id: int | None) -> str:
+    if not user_id:
+        return "—"
+    user = await session.get(User, user_id)
+    if user is None:
+        return "—"
+    return user.full_name or (f"@{user.username}" if user.username else str(user.telegram_id))
+
+
+# ------------------------------------------------------------------ операции
+
+
+async def entry_card(session: AsyncSession, entry: WorkEntry, show_amount: bool) -> str:
+    wt = await session.get(WorkType, entry.work_type_id)
+    emp = await session.get(Employee, entry.employee_id)
+    dept = await session.get(Department, entry.department_id)
+    lines = [
+        f"{STATUS_ICONS[entry.status]} <b>{entry.number}</b> · {STATUS_TITLES[entry.status]}",
+        f"👤 {h(emp.full_name)} · {h(dept.code)}",
+        f"🛠 {h(wt.name)} × {fmt_qty(entry.quantity, entry.unit_code)}",
+        f"📅 {entry.performed_on:%d.%m.%Y}" + (f" · 🧾 #{h(entry.order_ref)}" if entry.order_ref else ""),
+    ]
+    if entry.comment:
+        lines.append(f"💬 {h(entry.comment)}")
+    if show_amount:
+        if wt.calc_method == "fixed":
+            calc = f"фикс. {fmt_number(entry.rate, await minor_units(session, entry.currency))}"
+        else:
+            calc = f"{fmt_number(entry.rate)} × {fmt_number(entry.quantity)}"
+        lines.append(f"💰 {calc} = <b>{await money(session, entry.amount, entry.currency)}</b>")
+    lines.append(f"✍️ ввёл: {h(await user_name(session, entry.created_by))}")
+    if entry.decided_by:
+        verb = "подтвердил" if entry.status in ("confirmed", "cancelled") else "решение"
+        lines.append(f"👮 {verb}: {h(await user_name(session, entry.decided_by))}")
+    if entry.decision_comment:
+        lines.append(f"📝 {h(entry.decision_comment)}")
+    if entry.status == "cancelled":
+        lines.append(f"🚫 отменил: {h(await user_name(session, entry.cancelled_by))} — {h(entry.cancel_reason or '')}")
+    return "\n".join(lines)
+
+
+def entry_kb(entry: WorkEntry) -> InlineKeyboardMarkup | None:
+    kb = InlineKeyboardBuilder()
+    if entry.status == "draft":
+        kb.button(text="📤 Отправить", callback_data=f"w:s:{entry.id}")
+        kb.button(text="📅 Сегодня", callback_data=f"w:d:{entry.id}:0")
+        kb.button(text="📅 Вчера", callback_data=f"w:d:{entry.id}:1")
+        kb.button(text="✖️ Отменить", callback_data=f"w:x:{entry.id}")
+        kb.adjust(1, 2, 1)
+    elif entry.status == "pending":
+        kb.button(text="✅ Подтвердить", callback_data=f"w:c:{entry.id}")
+        kb.button(text="❌ Отклонить", callback_data=f"w:r:{entry.id}")
+        kb.adjust(2)
+    else:
+        return None
+    return kb.as_markup()
+
+
+# ------------------------------------------------------------------ склад
+
+
+async def stock_doc_card(session: AsyncSession, doc: StockDocument) -> str:
+    dept = await session.get(Department, doc.department_id)
+    status = {
+        "posted": "проведён",
+        "in_transit": "🚚 в пути — ждёт подтверждения получения",
+        "completed": "✅ получено",
+        "returned": "↩️ не принято, возвращено",
+    }[doc.status]
+    lines = [f"📦 <b>{doc.number}</b> · {stock.DOC_TITLES[doc.doc_type]} · {h(dept.code)}", status]
+    for line, product in await stock.document_lines(session, doc.id):
+        qty = fmt_qty(line.qty_entered, line.unit_entered)
+        if line.unit_entered != product.base_unit:
+            qty += f" (= {fmt_qty(line.qty_base, product.base_unit)})"
+        lines.append(f"• {h(product.name)}: {qty}")
+    for label, emp_id in (("от", doc.employee_id), ("кому", doc.target_employee_id)):
+        if emp_id:
+            emp = await session.get(Employee, emp_id)
+            lines.append(f"👤 {label}: {h(emp.full_name)}")
+    if doc.target_department_id:
+        target = await session.get(Department, doc.target_department_id)
+        lines.append(f"🏢 в подразделение: {h(target.code)}")
+    if doc.order_ref:
+        lines.append(f"🧾 #{h(doc.order_ref)}")
+    if doc.comment:
+        lines.append(f"💬 {h(doc.comment)}")
+    lines.append(f"✍️ {h(await user_name(session, doc.created_by))}")
+    if doc.accepted_by:
+        lines.append(f"📥 {h(await user_name(session, doc.accepted_by))}")
+    return "\n".join(lines)
+
+
+def stock_doc_kb(doc: StockDocument) -> InlineKeyboardMarkup | None:
+    if doc.status != "in_transit":
+        return None
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📥 Получено", callback_data=f"sd:a:{doc.id}")
+    kb.button(text="↩️ Не получено", callback_data=f"sd:d:{doc.id}")
+    return kb.as_markup()
+
+
+# ------------------------------------------------------------------ деньги
+
+
+async def adjustment_card(session: AsyncSession, adj: Adjustment) -> str:
+    emp = await session.get(Employee, adj.employee_id)
+    sign = adj.amount if adj.kind == "bonus" else -adj.amount
+    lines = [
+        f"{'🎁' if adj.kind == 'bonus' else '⛔'} <b>{adj.number}</b> · {payroll.ADJ_TITLES[adj.kind]}",
+        f"👤 {h(emp.full_name)}",
+        f"💰 <b>{await money(session, sign, adj.currency, signed=True)}</b>",
+        f"📄 Основание: {h(adj.reason)}",
+        f"📅 {adj.business_date:%d.%m.%Y} · статус: {payroll.ADJ_STATUS_TITLES[adj.status]}",
+        f"✍️ выписал: {h(await user_name(session, adj.created_by))}",
+    ]
+    if adj.decided_by:
+        lines.append(f"🖋 подписал/решил: {h(await user_name(session, adj.decided_by))}")
+    if adj.decision_comment:
+        lines.append(f"📝 {h(adj.decision_comment)}")
+    return "\n".join(lines)
+
+
+def adjustment_kb(adj: Adjustment) -> InlineKeyboardMarkup | None:
+    if adj.status != "pending":
+        return None
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🖋 Подписать", callback_data=f"adj:s:{adj.id}")
+    kb.button(text="❌ Отклонить", callback_data=f"adj:r:{adj.id}")
+    return kb.as_markup()
+
+
+def consent_kb(adj: Adjustment) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Согласен", callback_data=f"adj:y:{adj.id}")
+    kb.button(text="✋ Не согласен", callback_data=f"adj:n:{adj.id}")
+    return kb.as_markup()
+
+
+async def payout_card(session: AsyncSession, payout: Payout) -> str:
+    emp = await session.get(Employee, payout.employee_id)
+    lines = [
+        f"💸 <b>{payout.number}</b> · {payroll.PAYOUT_KIND_TITLES[payout.kind]}",
+        f"👤 {h(emp.full_name)}",
+        f"💰 <b>{await money(session, payout.amount, payout.currency)}</b>",
+        f"📅 {payout.business_date:%d.%m.%Y} · {payroll.PAYOUT_STATUS_TITLES[payout.status]}",
+    ]
+    if payout.method or payout.comment:
+        lines.append("💬 " + h(" ".join(filter(None, [payout.method, payout.comment]))))
+    lines.append(f"✍️ зарегистрировал: {h(await user_name(session, payout.registered_by))}")
+    if payout.confirmed_by:
+        lines.append(f"✅ подтвердил: {h(await user_name(session, payout.confirmed_by))}")
+    if payout.status == "cancelled":
+        lines.append(f"🚫 отменена: {h(payout.cancel_reason or '')}")
+    return "\n".join(lines)
+
+
+def payout_kb(payout: Payout) -> InlineKeyboardMarkup | None:
+    if payout.status != "registered":
+        return None
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Подтвердить выплату", callback_data=f"po:c:{payout.id}")
+    return kb.as_markup()
+
+
+async def request_card(session: AsyncSession, req: PayoutRequest) -> str:
+    emp = await session.get(Employee, req.employee_id)
+    status = {
+        "requested": "⏳ ожидает решения",
+        "approved": "✅ одобрен",
+        "rejected": "❌ отклонён",
+        "cancelled": "🚫 отменён",
+    }[req.status]
+    text = (
+        f"🙋 <b>{req.number}</b> · запрос выплаты\n👤 {h(emp.full_name)}\n"
+        f"💰 <b>{await money(session, req.amount, req.currency)}</b>\n{status}"
+    )
+    if req.comment:
+        text += f"\n💬 {h(req.comment)}"
+    return text
+
+
+def request_kb(req: PayoutRequest) -> InlineKeyboardMarkup | None:
+    if req.status != "requested":
+        return None
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Одобрить", callback_data=f"rq:a:{req.id}")
+    kb.button(text="❌ Отклонить", callback_data=f"rq:r:{req.id}")
+    return kb.as_markup()
+
+
+def statement_text(st: payroll.Statement, with_available: bool = False) -> str:
+    lines = [f"💰 <b>Расчёт: {h(st.employee.full_name)}</b>", st.title]
+    if not st.currencies:
+        lines.append("\nНачислений и выплат нет.")
+    for code, cs in st.currencies.items():
+
+        def m(v, signed=False, code=code, places=cs.minor_units):
+            return (fmt_signed_money if signed else fmt_money)(v, code, places)
+
+        lines.append(f"\n<b>{code}</b>")
+        lines.append(f"Входящий остаток: {m(cs.opening)}")
+        if cs.work_lines:
+            lines.append("<u>Начислено за работу</u>")
+            for wl in cs.work_lines:
+                lines.append(
+                    f"• {h(wl.title)}: {wl.count} оп., {fmt_qty(wl.quantity, wl.unit)} × "
+                    f"{fmt_number(wl.rate)} = {m(wl.amount)}"
+                )
+        if cs.other_lines:
+            lines.append("<u>Премии, удержания, выплаты, корректировки</u>")
+            for ol in cs.other_lines:
+                lines.append(
+                    f"• {ol.business_date:%d.%m} {payroll.LEDGER_TITLES[ol.entry_type]} "
+                    f"{m(ol.amount, signed=True)} — {h(ol.comment)}"
+                )
+        lines.append("")
+        lines.append(f"Начислено: {m(cs.accrued)}")
+        lines.append(f"Удержано: {m(cs.deducted)}")
+        if cs.corrections:
+            lines.append(f"Корректировки: {m(cs.corrections, signed=True)}")
+        lines.append(f"Выплачено: {m(cs.paid)}")
+        lines.append(f"<b>Остаток: {m(cs.closing)}</b>" + (" (долг)" if cs.closing < 0 else ""))
+        if cs.pending_count:
+            lines.append(f"⏳ Ждёт подтверждения: {cs.pending_count} оп. на {m(cs.pending_amount)} (не входит)")
+        if with_available and cs.reserved:
+            lines.append(f"🔒 В обработке выплат: {m(cs.reserved)}; доступно: {m(cs.available)}")
+    return "\n".join(lines)
