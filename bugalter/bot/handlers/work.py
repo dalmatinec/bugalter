@@ -91,7 +91,7 @@ async def op_command(
 
 
 async def _quick_op(message, items, dept, session, actor, settings, notifier, is_private, sessionmaker):
-    need(items, 3, "/op <сотрудник> <работа> <кол-во> [#заказ] [вчера|ДД.ММ] [комментарий]")
+    need(items, 3, "/op <сотрудник> <работа> <кол-во> [#заказ] [вчера|ДД.ММ] [*коэффициент] [комментарий]")
     emp = await org.get_employee(session, items[0])
     wt = await tariffs.get_work_type(session, items[1])
     unit = await session.get(Unit, wt.unit_code)
@@ -112,6 +112,7 @@ async def _quick_op(message, items, dept, session, actor, settings, notifier, is
         comment=tail.comment,
         submit=True,
         chat_id=chat_id,
+        coefficient_codes=tail.coefficients,
     )
     entry = result.entry
     card = await ui.entry_card(session, entry, _show_amounts(settings, is_private))
@@ -151,7 +152,8 @@ async def wiz_work_type(callback: CallbackQuery, state: FSMContext, session, not
     notifier.send(
         callback.message.chat.id,
         f"{mention}, ответьте на это сообщение: количество в «{h(wt.unit_code)}».\n"
-        "Можно добавить номер заказа, дату и комментарий: <code>3 #A-1052 вчера срочный</code>\n/cancel — отмена",
+        "Можно добавить номер заказа, дату, коэффициент и комментарий: <code>3 #A-1052 вчера *срочно текст</code>\n"
+        "/cancel — отмена",
         ForceReply(selective=True, input_field_placeholder="3 #A-1052"),
     )
 
@@ -179,6 +181,7 @@ async def wiz_quantity(message: Message, state: FSMContext, session, actor, sett
         comment=tail.comment,
         submit=False,
         chat_id=chat_id,
+        coefficient_codes=tail.coefficients,
     )
     await state.clear()
     card = await ui.entry_card(session, result.entry, _show_amounts(settings, is_private))

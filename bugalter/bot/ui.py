@@ -1,5 +1,6 @@
 """Тексты карточек и клавиатуры."""
 
+from decimal import Decimal
 from html import escape
 
 from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
@@ -79,12 +80,12 @@ async def entry_card(session: AsyncSession, entry: WorkEntry, show_amount: bool)
     ]
     if entry.comment:
         lines.append(f"💬 {h(entry.comment)}")
+    if entry.coefficient_codes:
+        lines.append("⚡ " + ", ".join(h(c) for c in entry.coefficient_codes) + f" (×{fmt_number(entry.coefficient)})")
     if show_amount:
-        if wt.calc_method == "fixed":
-            calc = f"фикс. {fmt_number(entry.rate, await minor_units(session, entry.currency))}"
-        else:
-            calc = f"{fmt_number(entry.rate)} × {fmt_number(entry.quantity)}"
-        lines.append(f"💰 {calc} = <b>{await money(session, entry.amount, entry.currency)}</b>")
+        lines.append(
+            f"💰 {calc_text(wt.calc_method, entry)} = <b>{await money(session, entry.amount, entry.currency)}</b>"
+        )
     lines.append(f"✍️ ввёл: {h(await user_name(session, entry.created_by))}")
     if entry.decided_by:
         verb = "подтвердил" if entry.status in ("confirmed", "cancelled") else "решение"
@@ -94,6 +95,23 @@ async def entry_card(session: AsyncSession, entry: WorkEntry, show_amount: bool)
     if entry.status == "cancelled":
         lines.append(f"🚫 отменил: {h(await user_name(session, entry.cancelled_by))} — {h(entry.cancel_reason or '')}")
     return "\n".join(lines)
+
+
+def calc_text(method: str, entry: WorkEntry) -> str:
+    """Как получена сумма: «45 × 400 + 5 × 450», «3,5 % от 12 345,67», «фикс. 700», плюс коэффициент."""
+    details = entry.calc_details or {}
+    pieces = details.get("pieces") or [{"qty": str(entry.quantity), "rate": str(entry.rate)}]
+    if method == "fixed":
+        text = f"фикс. {fmt_number(entry.rate)}"
+    elif method == "percent":
+        text = f"{fmt_number(entry.rate)} % от {fmt_number(entry.quantity)}"
+    else:
+        text = " + ".join(f"{fmt_number(Decimal(p['qty']))} × {fmt_number(Decimal(p['rate']))}" for p in pieces)
+        if details.get("tiered"):
+            text += f" (ступени, до этого в периоде: {fmt_number(Decimal(details.get('prior_volume', '0')))})"
+    if entry.coefficient != 1:
+        text = f"({text}) × {fmt_number(entry.coefficient)}"
+    return text
 
 
 def entry_kb(entry: WorkEntry) -> InlineKeyboardMarkup | None:
@@ -172,6 +190,12 @@ async def adjustment_card(session: AsyncSession, adj: Adjustment) -> str:
     ]
     if adj.decided_by:
         lines.append(f"🖋 подписал/решил: {h(await user_name(session, adj.decided_by))}")
+    if adj.kind != "bonus" and adj.status == "approved" and adj.outstanding > 0:
+        lines.append(
+            f"⏳ Удержано {await money(session, adj.withheld, adj.currency)} из "
+            f"{await money(session, adj.amount, adj.currency)}; остаток удерживается из следующих начислений "
+            "(лимит удержаний)"
+        )
     if adj.decision_comment:
         lines.append(f"📝 {h(adj.decision_comment)}")
     return "\n".join(lines)
@@ -259,10 +283,17 @@ def statement_text(st: payroll.Statement, with_available: bool = False) -> str:
         if cs.work_lines:
             lines.append("<u>Начислено за работу</u>")
             for wl in cs.work_lines:
-                lines.append(
-                    f"• {h(wl.title)}: {wl.count} оп., {fmt_qty(wl.quantity, wl.unit)} × "
-                    f"{fmt_number(wl.rate)} = {m(wl.amount)}"
-                )
+                if wl.method == "fixed":
+                    calc = f"{wl.count} оп. × фикс. {fmt_number(wl.rate)}"
+                elif wl.method == "percent":
+                    calc = f"{wl.count} оп., {fmt_number(wl.rate)} % от {fmt_number(wl.quantity)}"
+                else:
+                    calc = f"{wl.count} оп., {fmt_qty(wl.quantity, wl.unit)} × {fmt_number(wl.rate)}"
+                    if wl.tiered:
+                        calc += " (ступень)"
+                if wl.coefficient != 1:
+                    calc += f" × коэф. {fmt_number(wl.coefficient)}"
+                lines.append(f"• {h(wl.title)}: {calc} = {m(wl.amount)}")
         if cs.other_lines:
             lines.append("<u>Премии, удержания, выплаты, корректировки</u>")
             for ol in cs.other_lines:
@@ -281,4 +312,8 @@ def statement_text(st: payroll.Statement, with_available: bool = False) -> str:
             lines.append(f"⏳ Ждёт подтверждения: {cs.pending_count} оп. на {m(cs.pending_amount)} (не входит)")
         if with_available and cs.reserved:
             lines.append(f"🔒 В обработке выплат: {m(cs.reserved)}; доступно: {m(cs.available)}")
+        if with_available and cs.outstanding_withholding:
+            lines.append(f"⏳ Ещё будет удержано (лимит удержаний): {m(cs.outstanding_withholding)}")
+        if with_available and cs.credit_limit:
+            lines.append(f"💳 Аванс в долг: до {m(cs.credit_limit)} сверх доступного")
     return "\n".join(lines)

@@ -205,11 +205,12 @@ async def test_payout_cannot_exceed_balance(world, session, settings):
             kind="advance",
             idempotency_key=key(),
         )
-    loose = dataclasses.replace(settings, allow_negative_balance=True)
+    # Аванс в долг: по умолчанию лимит 0, после установки лимита — можно сверх заработанного.
+    await payroll.set_credit_limit(session, w.manager, settings, w.petr, D("100"), "USD")
     await payroll.register_payout(
         session,
         w.accountant,
-        loose,
+        settings,
         employee=w.petr,
         amount=D("150"),
         currency="USD",

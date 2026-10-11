@@ -66,10 +66,17 @@ class Actor:
 
 
 async def upsert_user(session: AsyncSession, telegram_id: int, username: str | None, full_name: str) -> User:
-    stmt = insert(User).values(telegram_id=telegram_id, username=username, full_name=full_name or "")
+    """Пользователь по Telegram ID. Пишет в БД только если пользователь новый или сменил имя."""
+    user = (await session.execute(select(User).where(User.telegram_id == telegram_id))).scalar_one_or_none()
+    full_name = full_name or ""
+    if user is not None:
+        if user.username != username or (full_name and user.full_name != full_name):
+            user.username = username
+            user.full_name = full_name or user.full_name
+        return user
+    stmt = insert(User).values(telegram_id=telegram_id, username=username, full_name=full_name)
     stmt = stmt.on_conflict_do_update(
-        index_elements=[User.telegram_id],
-        set_={"username": username, "full_name": full_name or ""},
+        index_elements=[User.telegram_id], set_={"username": username, "full_name": full_name}
     ).returning(User.id)
     user_id = (await session.execute(stmt)).scalar_one()
     return await session.get(User, user_id, populate_existing=True)

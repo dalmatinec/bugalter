@@ -11,17 +11,18 @@ from decimal import Decimal
 from sqlalchemy import and_, case, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models import Department, Employee, Tariff, WorkType, WorkTypeDepartment
+from ..db.models import Coefficient, Department, Employee, Tariff, TariffTier, WorkType, WorkTypeDepartment
 from ..domain.errors import AccessDenied, NotFound, ValidationError
-from ..domain.money import ROUNDING_MODES
+from ..domain.money import ROUNDING_MODES, scale_of
 from ..domain.permissions import Perm
 from . import reference
 from .audit import audit
 from .settings import Settings
 
 CALC_METHODS = {
-    "per_unit": "количество × ставка",
+    "per_unit": "количество × ставка (можно со ступенчатой шкалой)",
     "fixed": "фиксированная сумма за операцию",
+    "percent": "процент от суммы: количество — база (например, сумма заказа), ставка — %",
 }
 
 
@@ -141,8 +142,12 @@ async def create_tariffs(
     employees: list[Employee] | None,
     valid_from: dt.date | None,
     comment: str | None = None,
+    tiers: list[tuple[Decimal, Decimal]] | None = None,
 ) -> list[Tariff]:
-    """Создаёт тариф (или по одному на каждого сотрудника из списка). Старые тарифы не меняются."""
+    """Создаёт тариф (или по одному на каждого сотрудника из списка). Старые тарифы не меняются.
+
+    tiers — ступени шкалы [(порог, ставка)]: единицы сверх порога (накопленно за период) идут по своей ставке.
+    """
     department_id = department.id if department else None
     actor.require(Perm.TARIFF_MANAGE, department_id)
     today = settings.today()
@@ -153,6 +158,7 @@ async def create_tariffs(
         raise ValidationError("Ставка не может быть отрицательной")
     currency_code = (currency or settings.currency).upper()
     await reference.get_currency(session, currency_code)
+    tiers = validate_tiers(work_type, tiers)
     created = []
     for employee in employees or [None]:
         tariff = Tariff(
@@ -169,6 +175,10 @@ async def create_tariffs(
         created.append(tariff)
     await session.flush()
     for tariff in created:
+        for threshold, tier_rate in tiers:
+            session.add(TariffTier(tariff_id=tariff.id, threshold=threshold, rate=tier_rate))
+    await session.flush()
+    for tariff in created:
         await audit(
             session,
             actor.user.id,
@@ -183,6 +193,7 @@ async def create_tariffs(
                 "employee_id": tariff.employee_id,
                 "valid_from": valid_from,
                 "backdated": valid_from < today,
+                "tiers": [[t, r] for t, r in tiers],
             },
         )
     return created
@@ -225,3 +236,97 @@ async def tariff_history(session: AsyncSession, work_type_id: int) -> list[tuple
         )
     ).all()
     return [(t, d, e) for t, d, e in rows]
+
+
+def validate_tiers(work_type: WorkType, tiers: list[tuple[Decimal, Decimal]] | None) -> list[tuple[Decimal, Decimal]]:
+    if not tiers:
+        return []
+    if work_type.calc_method != "per_unit":
+        raise ValidationError("Ступенчатая шкала возможна только для метода per_unit")
+    result = sorted(tiers)
+    previous = Decimal(0)
+    for threshold, rate in result:
+        if threshold <= previous:
+            raise ValidationError("Пороги шкалы должны быть больше нуля и не повторяться")
+        if rate < 0:
+            raise ValidationError("Ставка ступени не может быть отрицательной")
+        previous = threshold
+    return result
+
+
+async def tiers_of(session: AsyncSession, tariff_id: int) -> list[tuple[Decimal, Decimal]]:
+    rows = (
+        await session.execute(
+            select(TariffTier.threshold, TariffTier.rate)
+            .where(TariffTier.tariff_id == tariff_id)
+            .order_by(TariffTier.threshold)
+        )
+    ).all()
+    return [(t, r) for t, r in rows]
+
+
+def split_by_tiers(
+    prior: Decimal, quantity: Decimal, base_rate: Decimal, tiers: list[tuple[Decimal, Decimal]]
+) -> list[tuple[Decimal, Decimal]]:
+    """Делит количество по ступеням с учётом уже выполненного объёма: [(кол-во, ставка)].
+
+    Пример: до 50 — 400, с 51-го — 450; уже сделано 45, новая операция 10 → [(5, 400), (5, 450)].
+    """
+    bands = [(Decimal(0), base_rate), *tiers]
+    start, end = prior, prior + quantity
+    pieces = []
+    for index, (low, rate) in enumerate(bands):
+        high = bands[index + 1][0] if index + 1 < len(bands) else None
+        lo = max(start, low)
+        hi = end if high is None else min(end, high)
+        if hi > lo:
+            pieces.append((hi - lo, rate))
+    return pieces
+
+
+# ------------------------------------------------------------------ коэффициенты
+
+
+async def create_coefficient(session: AsyncSession, actor, code: str, factor: Decimal, name: str) -> Coefficient:
+    actor.require(Perm.TARIFF_MANAGE)
+    code = code.strip().lower().lstrip("*")
+    if not code or " " in code or len(code) > 32:
+        raise ValidationError("Код коэффициента — одно слово до 32 символов")
+    if factor <= 0 or scale_of(factor) > 4:
+        raise ValidationError("Коэффициент — положительное число, не больше 4 знаков после запятой")
+    if await session.get(Coefficient, code) is not None:
+        raise ValidationError(f"Коэффициент {code} уже есть. Значение не меняется, чтобы не исказить историю")
+    coef = Coefficient(code=code, name=name.strip() or code, factor=factor, created_by=actor.user.id)
+    session.add(coef)
+    await audit(session, actor.user.id, "tariff.coefficient_create", "coefficient", code, {"factor": factor})
+    return coef
+
+
+async def set_coefficient_active(session: AsyncSession, actor, code: str, active: bool) -> Coefficient:
+    actor.require(Perm.TARIFF_MANAGE)
+    coef = await session.get(Coefficient, code.strip().lower().lstrip("*"))
+    if coef is None:
+        raise NotFound(f"Нет коэффициента {code}. Список: /coefs")
+    coef.is_active = active
+    await audit(session, actor.user.id, "tariff.coefficient_active", "coefficient", coef.code, {"active": active})
+    return coef
+
+
+async def list_coefficients(session: AsyncSession) -> list[Coefficient]:
+    return list((await session.execute(select(Coefficient).order_by(Coefficient.code))).scalars())
+
+
+async def resolve_coefficients(session: AsyncSession, codes: list[str] | None) -> tuple[Decimal, list[str]]:
+    """Перемножает коэффициенты: «срочно» ×1,5 и «выходной» ×2 дают ×3."""
+    factor = Decimal(1)
+    used: list[str] = []
+    for raw in codes or []:
+        code = raw.strip().lower().lstrip("*")
+        if not code or code in used:
+            continue
+        coef = await session.get(Coefficient, code)
+        if coef is None or not coef.is_active:
+            raise ValidationError(f"Нет действующего коэффициента «{code}». Список: /coefs")
+        factor *= coef.factor
+        used.append(code)
+    return factor, used

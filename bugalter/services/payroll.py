@@ -11,11 +11,14 @@ from decimal import Decimal
 from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from ..db.models import (
     Adjustment,
+    AdjustmentInstallment,
     Currency,
     Employee,
+    EmployeeCreditLimit,
     LedgerEntry,
     Payout,
     PayoutRequest,
@@ -26,11 +29,11 @@ from ..db.models import (
     WorkType,
 )
 from ..domain.errors import AccessDenied, Conflict, DomainError, InsufficientFunds, NotFound, ValidationError
-from ..domain.money import fmt_money, scale_of
+from ..domain.money import currency_step, fmt_money, round_to_step, scale_of
 from ..domain.permissions import Perm
 from . import ledger, org
 from .audit import audit
-from .settings import Settings
+from .settings import Settings, get_settings
 
 ADJ_TITLES = {"bonus": "Премия", "penalty": "Штраф", "deduction": "Удержание"}
 ADJ_STATUS_TITLES = {
@@ -158,15 +161,22 @@ async def _locked_adj(session: AsyncSession, adj_id: int) -> Adjustment:
     return adj
 
 
-async def _post_adjustment(session: AsyncSession, settings: Settings, adj: Adjustment, user_id: int) -> LedgerEntry:
-    sign = Decimal(1) if adj.kind == "bonus" else Decimal(-1)
+async def _post_adjustment(
+    session: AsyncSession, settings: Settings, adj: Adjustment, user_id: int
+) -> LedgerEntry | None:
+    """Премия проводится целиком. Штраф/удержание — через удержания частями с учётом лимита."""
+    adj.status = "approved"
+    if adj.kind != "bonus":
+        await session.flush()
+        posted = await apply_withholdings(session, settings, adj.employee_id, adj.currency, user_id)
+        return next((entry for entry, adj_id in posted if adj_id == adj.id), None)
     entry, _ = await ledger.post(
         session,
         settings,
         employee_id=adj.employee_id,
         department_id=adj.department_id,
         currency=adj.currency,
-        amount=sign * adj.amount,
+        amount=adj.amount,
         entry_type=adj.kind,
         source_type="adjustment",
         source_id=adj.id,
@@ -174,8 +184,139 @@ async def _post_adjustment(session: AsyncSession, settings: Settings, adj: Adjus
         posted_by=user_id,
         comment=f"{adj.number}: {adj.reason}",
     )
-    adj.status = "approved"
+    await session.flush()
+    # Премия увеличивает начисления периода — при лимите удержаний может освободиться место.
+    await apply_withholdings(session, settings, adj.employee_id, adj.currency, user_id)
     return entry
+
+
+async def _period_withholding_room(
+    session: AsyncSession, settings: Settings, employee_id: int, currency: str, period: PayrollPeriod
+) -> Decimal | None:
+    """Сколько ещё можно удержать в периоде: лимит% × начисления периода − уже удержанное. None — без лимита."""
+    limit = settings.deduction_limit_percent
+    if limit is None:
+        return None
+    original = aliased(LedgerEntry)
+    rows = (
+        await session.execute(
+            select(LedgerEntry.entry_type, original.entry_type, func.sum(LedgerEntry.amount))
+            .outerjoin(original, original.id == LedgerEntry.reverses_id)
+            .where(
+                LedgerEntry.employee_id == employee_id,
+                LedgerEntry.currency == currency,
+                LedgerEntry.period_id == period.id,
+            )
+            .group_by(LedgerEntry.entry_type, original.entry_type)
+        )
+    ).all()
+    base = used = Decimal(0)
+    for entry_type, original_type, total in rows:
+        effective = original_type if entry_type == "reversal" else entry_type
+        if effective in ("work", "bonus"):
+            base += total
+        elif effective in ("penalty", "deduction"):
+            used -= total
+    cur = await _currency(session, currency)
+    cap = round_to_step(base * limit / Decimal(100), currency_step(cur.minor_units), "DOWN") if base > 0 else 0
+    return cap - used
+
+
+async def apply_withholdings(
+    session: AsyncSession, settings: Settings, employee_id: int, currency: str, user_id: int | None
+) -> list[tuple[LedgerEntry, int]]:
+    """Проводит очередные части подписанных штрафов/удержаний (старые — первыми) в пределах лимита.
+
+    Без лимита удержание проводится целиком сразу. С лимитом — в текущем открытом периоде не больше
+    deduction_limit_percent от начислений периода; остаток ждёт новых начислений.
+    """
+    pending = select(Adjustment.id).where(
+        Adjustment.employee_id == employee_id,
+        Adjustment.currency == currency,
+        Adjustment.status == "approved",
+        Adjustment.kind != "bonus",
+        Adjustment.withheld < Adjustment.amount,
+    )
+    if (await session.execute(pending.limit(1))).first() is None:
+        return []
+    # Сериализуем удержания по сотруднику: параллельные начисления не должны удержать дважды.
+    await session.execute(select(Employee.id).where(Employee.id == employee_id).with_for_update())
+    adjustments = (
+        (
+            await session.execute(
+                select(Adjustment)
+                .where(Adjustment.id.in_(pending))
+                .order_by(Adjustment.business_date, Adjustment.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    limited = settings.deduction_limit_percent is not None
+    today = settings.today()
+    posted: list[tuple[LedgerEntry, int]] = []
+    for adj in adjustments:
+        business_date = today if limited else adj.business_date
+        period = await ledger.posting_period(session, business_date, settings)
+        room = await _period_withholding_room(session, settings, employee_id, currency, period)
+        take = adj.outstanding if room is None else min(adj.outstanding, room)
+        if take <= 0:
+            break
+        seq = (
+            await session.execute(
+                select(func.count())
+                .select_from(AdjustmentInstallment)
+                .where(AdjustmentInstallment.adjustment_id == adj.id)
+            )
+        ).scalar_one() + 1
+        installment = AdjustmentInstallment(adjustment_id=adj.id, seq=seq, period_id=period.id, amount=take)
+        session.add(installment)
+        await session.flush()
+        part = "" if take == adj.amount else f" (часть {seq}: {take.normalize():f} из {adj.amount.normalize():f})"
+        entry, _ = await ledger.post(
+            session,
+            settings,
+            employee_id=adj.employee_id,
+            department_id=adj.department_id,
+            currency=adj.currency,
+            amount=-take,
+            entry_type=adj.kind,
+            source_type="installment",
+            source_id=installment.id,
+            business_date=business_date,
+            posted_by=user_id,
+            comment=f"{adj.number}: {adj.reason}{part}",
+        )
+        adj.withheld = adj.withheld + take
+        posted.append((entry, adj.id))
+        await audit(
+            session,
+            user_id,
+            "payroll.withhold",
+            "adjustment",
+            adj.id,
+            {"installment": seq, "amount": take, "period_id": period.id, "outstanding": adj.outstanding},
+        )
+    await session.flush()
+    return posted
+
+
+async def outstanding_withholdings(session: AsyncSession, employee_id: int) -> dict[str, Decimal]:
+    rows = (
+        await session.execute(
+            select(Adjustment.currency, func.sum(Adjustment.amount - Adjustment.withheld))
+            .where(
+                Adjustment.employee_id == employee_id,
+                Adjustment.status == "approved",
+                Adjustment.kind != "bonus",
+                Adjustment.withheld < Adjustment.amount,
+            )
+            .group_by(Adjustment.currency)
+        )
+    ).all()
+    return {code: total for code, total in rows}
 
 
 async def sign_adjustment(
@@ -252,11 +393,29 @@ async def cancel_adjustment(
         actor.require(Perm.PAYROLL_SIGN, adj.department_id)
         if actor.is_self(adj.employee_id) and not actor.is_owner:
             raise AccessDenied("Нельзя отменять документы в отношении себя")
-        original = await ledger.find_entry(session, "adjustment", adj.id, adj.kind)
-        if original:
-            reversal = await ledger.reverse(
+        originals = []
+        legacy = await ledger.find_entry(session, "adjustment", adj.id, adj.kind)
+        if legacy:
+            originals.append(legacy)
+        installment_ids = select(AdjustmentInstallment.id).where(AdjustmentInstallment.adjustment_id == adj.id)
+        originals += (
+            (
+                await session.execute(
+                    select(LedgerEntry).where(
+                        LedgerEntry.source_type == "installment",
+                        LedgerEntry.source_id.in_(installment_ids),
+                        LedgerEntry.entry_type == adj.kind,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for original in originals:
+            entry = await ledger.reverse(
                 session, settings, original, posted_by=actor.user.id, comment=f"Отмена {adj.number}: {reason}"
             )
+            reversal = reversal or entry
     elif adj.status in ("pending", "awaiting_consent", "disputed"):
         actor.require(Perm.PAYROLL_ADJUST, adj.department_id)
     else:
@@ -322,11 +481,9 @@ async def register_payout(
     # Блокируем строку сотрудника, чтобы две параллельные выплаты не прошли проверку остатка одновременно.
     await session.execute(select(Employee.id).where(Employee.id == employee.id).with_for_update())
     can_pay = await ledger.available(session, employee.id, currency_code, exclude_request_id=request_id)
-    if amount > can_pay and not settings.allow_negative_balance:
-        raise InsufficientFunds(
-            f"Доступно к выплате {fmt_money(can_pay, currency_code, cur.minor_units)}. "
-            "Выплата сверх заработанного выключена (настройка allow_negative_balance)"
-        )
+    credit = Decimal(0) if kind == "salary" else await credit_limit(session, settings, employee.id, currency_code)
+    if amount > can_pay + credit:
+        raise InsufficientFunds(_funds_message(can_pay, credit, currency_code, cur.minor_units, kind))
     stmt = (
         insert(Payout)
         .values(
@@ -452,6 +609,64 @@ async def registered_payouts(session: AsyncSession, actor) -> list[tuple[Payout,
     return [tuple(r) for r in (await session.execute(query)).all()]
 
 
+def _funds_message(can_pay: Decimal, credit: Decimal, currency: str, minor: int, kind: str) -> str:
+    text = f"Доступно к выплате {fmt_money(max(can_pay, Decimal(0)), currency, minor)}"
+    if can_pay < 0:
+        text += f" (долг {fmt_money(-can_pay, currency, minor)})"
+    if kind == "salary":
+        return text + ". Сверх заработанного можно выдать только аванс или выплату по запросу"
+    if credit > 0:
+        return text + f", аванс в долг — до {fmt_money(credit, currency, minor)} сверх этого"
+    return text + ". Аванс в долг сотруднику не разрешён: /credit <сотрудник> <лимит>"
+
+
+async def credit_limit(session: AsyncSession, settings: Settings, employee_id: int, currency: str) -> Decimal:
+    """Сколько можно выдать сверх заработанного: индивидуальный лимит или default_credit_limit."""
+    row = await session.get(EmployeeCreditLimit, (employee_id, currency))
+    return row.amount if row is not None else settings.default_credit_limit
+
+
+async def set_credit_limit(
+    session: AsyncSession, actor, settings: Settings, employee: Employee, amount: Decimal, currency: str | None
+) -> EmployeeCreditLimit:
+    department_id = await org.default_department_id(session, employee.id)
+    actor.require(Perm.PAYROLL_SIGN, department_id)
+    if actor.is_self(employee.id) and not actor.is_owner:
+        raise AccessDenied("Нельзя менять кредитный лимит себе")
+    currency_code = (currency or settings.currency).upper()
+    cur = await _currency(session, currency_code)
+    if amount < 0 or scale_of(amount) > cur.minor_units:
+        raise ValidationError("Лимит — неотрицательная сумма в валюте")
+    stmt = insert(EmployeeCreditLimit).values(
+        employee_id=employee.id, currency=currency_code, amount=amount, set_by=actor.user.id
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["employee_id", "currency"],
+        set_={"amount": amount, "set_by": actor.user.id, "set_at": func.now()},
+    )
+    await session.execute(stmt)
+    await audit(
+        session,
+        actor.user.id,
+        "payroll.credit_limit",
+        "employee",
+        employee.id,
+        {"amount": amount, "currency": currency_code},
+    )
+    return await session.get(EmployeeCreditLimit, (employee.id, currency_code), populate_existing=True)
+
+
+async def list_credit_limits(session: AsyncSession) -> list[tuple[EmployeeCreditLimit, Employee]]:
+    rows = (
+        await session.execute(
+            select(EmployeeCreditLimit, Employee)
+            .join(Employee, Employee.id == EmployeeCreditLimit.employee_id)
+            .order_by(Employee.full_name)
+        )
+    ).all()
+    return [tuple(r) for r in rows]
+
+
 # ------------------------------------------------------------------ запросы выплат
 
 
@@ -477,8 +692,9 @@ async def request_payout(
     cur = await _check_amount(session, amount, currency_code)
     await session.execute(select(Employee.id).where(Employee.id == employee.id).with_for_update())
     can_pay = await ledger.available(session, employee.id, currency_code)
-    if amount > can_pay and not settings.allow_negative_balance:
-        raise InsufficientFunds(f"Доступно к выплате {fmt_money(can_pay, currency_code, cur.minor_units)}")
+    credit = await credit_limit(session, settings, employee.id, currency_code)
+    if amount > can_pay + credit:
+        raise InsufficientFunds(_funds_message(can_pay, credit, currency_code, cur.minor_units, "on_demand"))
     req = PayoutRequest(
         idempotency_key=idempotency_key,
         employee_id=employee.id,
@@ -745,6 +961,9 @@ class WorkLine:
     count: int
     quantity: Decimal
     amount: Decimal
+    method: str = "per_unit"
+    coefficient: Decimal = Decimal(1)
+    tiered: bool = False
 
 
 @dataclass
@@ -767,6 +986,10 @@ class CurrencyStatement:
     pending_amount: Decimal = Decimal(0)
     pending_count: int = 0
     reserved: Decimal = Decimal(0)
+    # Подписанные штрафы/удержания, которые ещё будут удержаны (лимит удержаний).
+    outstanding_withholding: Decimal = Decimal(0)
+    # Сколько можно выдать сверх заработанного (аванс в долг).
+    credit_limit: Decimal = Decimal(0)
     work_lines: list[WorkLine] = field(default_factory=list)
     other_lines: list[OtherLine] = field(default_factory=list)
 
@@ -832,26 +1055,33 @@ async def build_statement(
 
     work_rows = (
         await session.execute(
-            select(
-                WorkType.name,
-                WorkEntry.unit_code,
-                WorkEntry.rate,
-                LedgerEntry.currency,
-                func.count(),
-                func.sum(WorkEntry.quantity),
-                func.sum(LedgerEntry.amount),
-            )
+            select(WorkType.name, WorkType.calc_method, WorkEntry, LedgerEntry.currency, LedgerEntry.amount)
             .join(WorkEntry, and_(LedgerEntry.source_type == "work_entry", WorkEntry.id == LedgerEntry.source_id))
             .join(WorkType, WorkType.id == WorkEntry.work_type_id)
             .where(LedgerEntry.employee_id == employee.id, LedgerEntry.entry_type == "work", in_scope)
-            .group_by(WorkType.name, WorkEntry.unit_code, WorkEntry.rate, LedgerEntry.currency)
-            .order_by(WorkType.name, WorkEntry.rate)
+            .order_by(WorkType.name, WorkEntry.id)
         )
     ).all()
-    for name, unit, rate, code, count, qty, amount in work_rows:
+    # Строки расшифровки: вид работ × ставка (по ступеням — отдельной строкой на ступень) × коэффициент.
+    grouped: dict[tuple, WorkLine] = {}
+    for name, method, entry, code, amount in work_rows:
         st = cs(code)
-        st.work_lines.append(WorkLine(name, unit, rate, count, qty, amount))
         st.accrued += amount
+        details = entry.calc_details or {}
+        pieces = details.get("pieces") or [{"qty": str(entry.quantity), "rate": str(entry.rate), "amount": str(amount)}]
+        coefficient = Decimal(details.get("coefficient", "1"))
+        tiered = bool(details.get("tiered"))
+        for piece in pieces:
+            rate = Decimal(piece["rate"])
+            key = (code, name, entry.unit_code, rate, method, coefficient, tiered)
+            line = grouped.get(key)
+            if line is None:
+                line = WorkLine(name, entry.unit_code, rate, 0, Decimal(0), Decimal(0), method, coefficient, tiered)
+                grouped[key] = line
+                st.work_lines.append(line)
+            line.count += 1
+            line.quantity += Decimal(piece["qty"])
+            line.amount += Decimal(piece["amount"])
 
     other_rows = (
         await session.execute(
@@ -884,6 +1114,11 @@ async def build_statement(
     if include_reserved:
         for code, amount in (await ledger.reserved(session, employee.id)).items():
             cs(code).reserved = amount
+        for code, amount in (await outstanding_withholdings(session, employee.id)).items():
+            cs(code).outstanding_withholding = amount
+        settings_row = await get_settings(session)
+        for code, st in currencies.items():
+            st.credit_limit = await credit_limit(session, settings_row, employee.id, code)
 
     return Statement(employee, title, date_from, date_to, period, currencies)
 

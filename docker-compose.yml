@@ -37,7 +37,9 @@ services:
     volumes:
       - ./backups:/backups
       - ./scripts/backup.sh:/backup.sh:ro
-    entrypoint: ["sh", "/backup.sh", "loop"]
+    # Разовая копия: docker compose run --rm backup once
+    entrypoint: ["sh", "/backup.sh"]
+    command: ["loop"]
     depends_on:
       db:
         condition: service_healthy

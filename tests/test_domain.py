@@ -73,3 +73,23 @@ def test_parse_dates_and_ranges():
     assert parse_range("2026-10-01..2026-10-15", today) == (dt.date(2026, 10, 1), dt.date(2026, 10, 15))
     with pytest.raises(ValidationError):
         parse_date("32.10", today)
+
+
+@pytest.mark.parametrize(
+    "raw, expected", [("1", [1]), ("1,2", [1, 2]), ("", []), ("111, 222", [111, 222]), ("5;6", [5, 6])]
+)
+def test_owner_ids_from_env(monkeypatch, raw, expected):
+    from bugalter.config import Config
+
+    monkeypatch.setenv("OWNER_TELEGRAM_IDS", raw)
+    assert Config().owner_telegram_ids == expected
+
+
+def test_owner_ids_reject_garbage(monkeypatch):
+    from pydantic import ValidationError as PydanticValidationError
+
+    from bugalter.config import Config
+
+    monkeypatch.setenv("OWNER_TELEGRAM_IDS", "@ivan")
+    with pytest.raises(PydanticValidationError):
+        Config()

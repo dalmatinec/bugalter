@@ -69,15 +69,18 @@ class Tail:
     order_ref: str | None = None
     date_token: str | None = None
     comment: str | None = None
+    coefficients: list[str] = field(default_factory=list)
 
 
 def parse_tail(items: list[str]) -> Tail:
-    """Хвост операции: «#A-1052 вчера комментарий» в любом порядке."""
+    """Хвост операции: «#A-1052 вчера *срочно комментарий» в любом порядке (*код — коэффициент)."""
     tail = Tail()
     comment = []
     for item in items:
         if item.startswith("#") and len(item) > 1 and tail.order_ref is None:
             tail.order_ref = item[1:][:64]
+        elif item.startswith("*") and len(item) > 1:
+            tail.coefficients.append(item[1:].lower())
         elif tail.date_token is None and not comment and looks_like_date(item):
             tail.date_token = item
         else:

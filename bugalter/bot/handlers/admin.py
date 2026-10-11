@@ -1,5 +1,7 @@
 """Администрирование: подразделения, сотрудники, роли, группы, справочники, виды работ, тарифы, настройки."""
 
+from decimal import Decimal
+
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
@@ -10,7 +12,7 @@ from ...domain.dates import parse_date
 from ...domain.errors import AccessDenied, ValidationError
 from ...domain.money import fmt_number, parse_decimal
 from ...domain.permissions import PERM_TITLES, Perm
-from ...services import access, org, reference, tariffs, work
+from ...services import access, org, payroll, reference, tariffs, work
 from ...services import settings as settings_service
 from ...services.settings import SPECS
 from ..args import extract, need, parse_id, tokens
@@ -28,10 +30,13 @@ ADMIN_HELP = """<b>Администрирование</b>
 /roles · /role_add &lt;код&gt; &lt;право,право&gt; &lt;название&gt; (владелец) · /perms
 /grant &lt;tg_id|@username&gt; &lt;роль&gt; [подразделение|*] · /grants [tg_id|@username] · /revoke &lt;№&gt;
 <u>Работы и тарифы</u>
-/wt_add &lt;код&gt; &lt;единица&gt; &lt;per_unit|fixed&gt; &lt;название&gt; · /wt · /wt_off &lt;код&gt; · /wt_on &lt;код&gt;
+/wt_add &lt;код&gt; &lt;единица&gt; &lt;per_unit|fixed|percent&gt; &lt;название&gt; · /wt · /wt_off &lt;код&gt; · /wt_on &lt;код&gt;
 /wt_rename &lt;код&gt; &lt;название&gt; · /wt_depts &lt;код&gt; &lt;подр,подр|*&gt; · /wt_round &lt;код&gt; &lt;шаг|-&gt; [режим]
 /tariff &lt;работа&gt; &lt;ставка&gt; [USD] [dept=код] [emp=код,код] [from=ДД.ММ.ГГГГ] [комментарий]
+   tiers=50:450,100:500 — ступени за расчётный период (сверх 50 — 450, сверх 100 — 500)
 /tariffs &lt;работа&gt; — история ставок
+/coef_add &lt;код&gt; &lt;множитель&gt; &lt;название&gt; · /coefs · /coef_off · /coef_on — коэффициенты (*срочно в операции)
+/credit &lt;сотрудник&gt; &lt;лимит&gt; [валюта] · /credits — аванс в долг
 <u>Справочники и настройки</u>
 /units · /unit_add &lt;код&gt; &lt;знаков&gt; [название] · /currency_add &lt;код&gt; &lt;знаков&gt; &lt;название&gt;
 /products · /product_add &lt;артикул&gt; &lt;единица&gt; &lt;название&gt; · /product_unit &lt;артикул&gt; &lt;единица&gt; &lt;коэфф.&gt;
@@ -352,8 +357,12 @@ async def wt_round(message: Message, command: CommandObject, session, actor, not
 @router.message(Command("tariff"))
 async def tariff(message: Message, command: CommandObject, session, actor, settings, notifier, is_private):
     _private(is_private)
-    ex = extract(tokens(command.args), ("dept", "emp", "from"))
-    need(ex.rest, 2, "/tariff <работа> <ставка> [USD] [dept=код] [emp=код,код] [from=ДД.ММ.ГГГГ] [комментарий]")
+    ex = extract(tokens(command.args), ("dept", "emp", "from", "tiers"))
+    need(
+        ex.rest,
+        2,
+        "/tariff <работа> <ставка> [USD] [dept=код] [emp=код,код] [from=ДД.ММ.ГГГГ] [tiers=50:450,100:500] [комментарий]",
+    )
     wt = await tariffs.get_work_type(session, ex.rest[0])
     rate = parse_decimal(ex.rest[1], allow_zero=True, max_scale=6, what="ставку")
     rest = ex.rest[2:]
@@ -366,6 +375,7 @@ async def tariff(message: Message, command: CommandObject, session, actor, setti
     if ex.options.get("emp"):
         employees = [await org.get_employee(session, code) for code in ex.options["emp"].split(",") if code]
     valid_from = parse_date(ex.options["from"], settings.today()) if ex.options.get("from") else None
+    tiers = parse_tiers(ex.options.get("tiers"))
     created, repriced = await work.add_tariffs(
         session,
         actor,
@@ -377,6 +387,7 @@ async def tariff(message: Message, command: CommandObject, session, actor, setti
         employees=employees,
         valid_from=valid_from,
         comment=" ".join(rest) or None,
+        tiers=tiers,
     )
     scope = []
     if dept:
@@ -388,9 +399,34 @@ async def tariff(message: Message, command: CommandObject, session, actor, setti
         f"✅ Тариф «{h(wt.name)}»: {fmt_number(rate)} {t.currency} за {h(wt.unit_code)} "
         f"с {t.valid_from:%d.%m.%Y} ({h('; '.join(scope) or 'общий')}). Записей: {len(created)}."
     )
+    if tiers:
+        text += "\n📈 Ступени за период: " + tiers_text(rate, tiers)
     if repriced:
         text += f"\n♻️ Пересчитано неподтверждённых операций: {repriced}."
     notifier.answer(message, text)
+
+
+def parse_tiers(raw: str | None) -> list[tuple[Decimal, Decimal]] | None:
+    """«50:450,100:500» → [(50, 450), (100, 500)]: сверх 50 ед. — 450, сверх 100 — 500."""
+    if not raw:
+        return None
+    result = []
+    for part in raw.split(","):
+        threshold, sep, rate = part.partition(":")
+        if not sep:
+            raise ValidationError("Ступени: tiers=порог:ставка,порог:ставка — например tiers=50:450,100:500")
+        result.append(
+            (parse_decimal(threshold, max_scale=6, what="порог"), parse_decimal(rate, allow_zero=True, what="ставку"))
+        )
+    return result
+
+
+def tiers_text(base_rate: Decimal, tiers: list[tuple[Decimal, Decimal]]) -> str:
+    parts = [f"до {fmt_number(tiers[0][0])} — {fmt_number(base_rate)}"]
+    for index, (threshold, rate) in enumerate(tiers):
+        upper = f"–{fmt_number(tiers[index + 1][0])}" if index + 1 < len(tiers) else "+"
+        parts.append(f"{fmt_number(threshold)}{upper} — {fmt_number(rate)}")
+    return "; ".join(parts)
 
 
 @router.message(Command("tariffs"))
@@ -405,5 +441,71 @@ async def tariff_list(message: Message, command: CommandObject, session, actor, 
     lines = [f"<b>{h(wt.name)}</b> — история ставок (новые сверху)"]
     for t, dept_code, emp_code in rows[:50]:
         scope = " · ".join(filter(None, [dept_code and f"подр. {dept_code}", emp_code and f"сотр. {emp_code}"]))
-        lines.append(f"#{t.id} с {t.valid_from:%d.%m.%Y}: {fmt_number(t.rate)} {t.currency} · {h(scope or 'общий')}")
+        line = f"#{t.id} с {t.valid_from:%d.%m.%Y}: {fmt_number(t.rate)} {t.currency} · {h(scope or 'общий')}"
+        tier_rows = await tariffs.tiers_of(session, t.id)
+        if tier_rows:
+            line += f"\n   📈 {tiers_text(t.rate, tier_rows)}"
+        lines.append(line)
+    notifier.answer(message, "\n".join(lines))
+
+
+# ------------------------------------------------------------------ коэффициенты и кредитные лимиты
+
+
+@router.message(Command("coef_add"))
+async def coef_add(message: Message, command: CommandObject, session, actor, notifier):
+    items = tokens(command.args)
+    need(items, 3, "/coef_add <код> <множитель> <название>  — пример: /coef_add срочно 1.5 Срочный заказ")
+    factor = parse_decimal(items[1], max_scale=4, what="множитель")
+    coef = await tariffs.create_coefficient(session, actor, items[0], factor, " ".join(items[2:]))
+    notifier.answer(
+        message,
+        f"✅ Коэффициент <b>{h(coef.code)}</b> ×{fmt_number(coef.factor)} — {h(coef.name)}.\n"
+        f"Применение: <code>/op ivan доставка 3 *{h(coef.code)}</code>",
+    )
+
+
+@router.message(Command("coefs"))
+async def coefs(message: Message, session, notifier):
+    rows = await tariffs.list_coefficients(session)
+    lines = [
+        f"• <code>*{h(c.code)}</code> ×{fmt_number(c.factor)} — {h(c.name)}" + ("" if c.is_active else " (отключён)")
+        for c in rows
+    ]
+    notifier.answer(message, "\n".join(lines) or "Коэффициентов нет. /coef_add <код> <множитель> <название>")
+
+
+@router.message(Command("coef_off", "coef_on"))
+async def coef_active(message: Message, command: CommandObject, session, actor, notifier):
+    items = tokens(command.args)
+    need(items, 1, f"/{command.command} <код>")
+    coef = await tariffs.set_coefficient_active(session, actor, items[0], command.command == "coef_on")
+    notifier.answer(message, f"✅ {h(coef.code)}: {'включён' if coef.is_active else 'отключён'}")
+
+
+@router.message(Command("credit"))
+async def credit(message: Message, command: CommandObject, session, actor, settings, notifier, is_private):
+    _private(is_private)
+    items = tokens(command.args)
+    need(items, 2, "/credit <сотрудник> <лимит аванса в долг> [валюта]  (0 — запретить)")
+    emp = await org.get_employee(session, items[0])
+    amount = parse_decimal(items[1], allow_zero=True, what="лимит")
+    currency = items[2].upper() if len(items) > 2 else None
+    row = await payroll.set_credit_limit(session, actor, settings, emp, amount, currency)
+    notifier.answer(
+        message,
+        f"✅ {h(emp.full_name)}: аванс в долг до {fmt_number(row.amount, 2)} {row.currency}. "
+        "Долг гасится из следующих начислений автоматически.",
+    )
+
+
+@router.message(Command("credits"))
+async def credits(message: Message, session, actor, settings, notifier, is_private):
+    _private(is_private)
+    if not actor.can_anywhere(Perm.PAYROLL_SIGN):
+        raise AccessDenied("Недостаточно прав")
+    rows = await payroll.list_credit_limits(session)
+    lines = [f"По умолчанию: {fmt_number(settings.default_credit_limit, 2)} (настройка default_credit_limit)"]
+    for limit, emp in rows:
+        lines.append(f"• {h(emp.full_name)} ({h(emp.code)}): {fmt_number(limit.amount, 2)} {limit.currency}")
     notifier.answer(message, "\n".join(lines))

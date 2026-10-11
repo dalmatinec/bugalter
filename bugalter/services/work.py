@@ -8,11 +8,11 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models import Currency, Employee, LedgerEntry, Unit, WorkEntry, WorkType
+from ..db.models import Currency, Employee, LedgerEntry, Tariff, Unit, WorkEntry, WorkType
 from ..domain.errors import AccessDenied, Conflict, NotFound, ValidationError
 from ..domain.money import currency_step, round_to_step, scale_of
 from ..domain.permissions import Perm
-from . import ledger, org, tariffs
+from . import ledger, org, payroll, tariffs
 from .audit import audit
 from .settings import Settings
 
@@ -27,14 +27,49 @@ STATUS_TITLES = {
 MAX_BACKDATE_DAYS = 62
 
 
+HUNDRED = Decimal(100)
+
+
+def _plain(value: Decimal) -> str:
+    """Decimal без экспоненты: 400, 0.25 (а не 4E+2)."""
+    return format(value.normalize(), "f")
+
+
+def compute_pieces(
+    work_type: WorkType,
+    pieces_raw: list[tuple[Decimal, Decimal]],
+    coefficient: Decimal,
+    minor_units: int,
+    settings: Settings,
+) -> tuple[Decimal, list[dict]]:
+    """Сумма операции из кусков (кол-во, ставка). Округляется один раз; куски получают округлённые доли,
+    последний — остаток, поэтому сумма строк расшифровки всегда равна итогу."""
+    step = work_type.rounding_step or currency_step(minor_units)
+    mode = work_type.rounding_mode or settings.rounding_mode
+
+    def raw_amount(qty: Decimal, rate: Decimal) -> Decimal:
+        if work_type.calc_method == "fixed":
+            return rate
+        if work_type.calc_method == "percent":
+            return qty * rate / HUNDRED
+        return qty * rate
+
+    raws = [raw_amount(q, r) * coefficient for q, r in pieces_raw]
+    total = round_to_step(sum(raws, Decimal(0)), step, mode)
+    pieces = []
+    assigned = Decimal(0)
+    for index, ((qty, rate), raw) in enumerate(zip(pieces_raw, raws, strict=True)):
+        part = total - assigned if index == len(raws) - 1 else round_to_step(raw, step, mode)
+        assigned += part
+        pieces.append({"qty": _plain(qty), "rate": _plain(rate), "amount": _plain(part)})
+    return total, pieces
+
+
 def compute_amount(
     work_type: WorkType, quantity: Decimal, rate: Decimal, minor_units: int, settings: Settings
 ) -> Decimal:
-    """Сумма одной операции. Округляется сразу, поэтому сумма строк расшифровки всегда равна итогу."""
-    raw = rate if work_type.calc_method == "fixed" else quantity * rate
-    step = work_type.rounding_step or currency_step(minor_units)
-    mode = work_type.rounding_mode or settings.rounding_mode
-    return round_to_step(raw, step, mode)
+    """Сумма операции без ступеней и коэффициентов."""
+    return compute_pieces(work_type, [(quantity, rate)], Decimal(1), minor_units, settings)[0]
 
 
 @dataclass
@@ -43,24 +78,94 @@ class EntryResult:
     created: bool
 
 
-async def _price(
+@dataclass
+class Price:
+    tariff: Tariff
+    amount: Decimal
+    coefficient: Decimal
+    coefficient_codes: list[str]
+    details: dict
+
+
+async def confirmed_volume(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    employee_id: int,
+    work_type_id: int,
+    department_id: int,
+    on_date: dt.date,
+    exclude_entry_id: int | None = None,
+) -> Decimal:
+    """Подтверждённый объём сотрудника по виду работ в расчётном периоде даты on_date (для ступеней)."""
+    period = await ledger.period_for_date(session, on_date, settings)
+    query = select(func.coalesce(func.sum(WorkEntry.quantity), 0)).where(
+        WorkEntry.employee_id == employee_id,
+        WorkEntry.work_type_id == work_type_id,
+        WorkEntry.department_id == department_id,
+        WorkEntry.status == "confirmed",
+        WorkEntry.performed_on.between(period.date_from, period.date_to),
+    )
+    if exclude_entry_id is not None:
+        query = query.where(WorkEntry.id != exclude_entry_id)
+    return (await session.execute(query)).scalar_one()
+
+
+async def price_entry(
     session: AsyncSession,
     settings: Settings,
     wt: WorkType,
+    *,
     department_id: int,
     employee_id: int,
     performed_on: dt.date,
     quantity: Decimal,
-):
-    tariff = await tariffs.resolve_tariff(session, wt.id, department_id, employee_id, performed_on)
+    coefficient_codes: list[str] | None = None,
+    tariff: Tariff | None = None,
+    exclude_entry_id: int | None = None,
+) -> Price:
+    if tariff is None:
+        tariff = await tariffs.resolve_tariff(session, wt.id, department_id, employee_id, performed_on)
     if tariff is None:
         raise ValidationError(
             f"Нет тарифа «{wt.name}» на {performed_on:%d.%m.%Y} для этого сотрудника и подразделения. "
             "Операцию нельзя провести без ставки — заведите тариф: /tariff"
         )
     currency = await session.get(Currency, tariff.currency)
-    amount = compute_amount(wt, quantity, tariff.rate, currency.minor_units, settings)
-    return tariff, amount
+    coefficient, codes = await tariffs.resolve_coefficients(session, coefficient_codes)
+    tiers = await tariffs.tiers_of(session, tariff.id) if wt.calc_method == "per_unit" else []
+    details: dict = {"method": wt.calc_method}
+    if tiers:
+        prior = await confirmed_volume(
+            session,
+            settings,
+            employee_id=employee_id,
+            work_type_id=wt.id,
+            department_id=department_id,
+            on_date=performed_on,
+            exclude_entry_id=exclude_entry_id,
+        )
+        pieces_raw = tariffs.split_by_tiers(prior, quantity, tariff.rate, tiers)
+        details["tiered"] = True
+        details["prior_volume"] = _plain(prior)
+    else:
+        pieces_raw = [(quantity, tariff.rate)]
+    amount, pieces = compute_pieces(wt, pieces_raw, coefficient, currency.minor_units, settings)
+    details["pieces"] = pieces
+    if codes:
+        details["coefficient"] = _plain(coefficient)
+        details["coefficients"] = codes
+    return Price(tariff, amount, coefficient, codes, details)
+
+
+def _apply_price(entry: WorkEntry, price: Price) -> None:
+    entry.tariff_id = price.tariff.id
+    entry.rate = price.tariff.rate
+    entry.currency = price.tariff.currency
+    entry.amount = price.amount
+    entry.coefficient = price.coefficient
+    entry.coefficient_codes = price.coefficient_codes or None
+    entry.calc_details = price.details
 
 
 async def create_entry(
@@ -78,6 +183,7 @@ async def create_entry(
     comment: str | None = None,
     submit: bool = True,
     chat_id: int | None = None,
+    coefficient_codes: list[str] | None = None,
 ) -> EntryResult:
     """Создаёт операцию. Повтор с тем же idempotency_key возвращает уже созданную запись."""
     existing = await _by_key(session, idempotency_key)
@@ -105,7 +211,17 @@ async def create_entry(
         raise ValidationError("Дата выполнения не может быть в будущем")
     if (today - performed_on).days > MAX_BACKDATE_DAYS and not actor.can(Perm.TARIFF_BACKDATE):
         raise ValidationError(f"Операции старше {MAX_BACKDATE_DAYS} дней вводит только владелец/администратор")
-    tariff, amount = await _price(session, settings, wt, department_id, employee_id, performed_on, quantity)
+    price = await price_entry(
+        session,
+        settings,
+        wt,
+        department_id=department_id,
+        employee_id=employee_id,
+        performed_on=performed_on,
+        quantity=quantity,
+        coefficient_codes=coefficient_codes,
+    )
+    tariff, amount = price.tariff, price.amount
     now = func.now()
     stmt = (
         insert(WorkEntry)
@@ -122,6 +238,9 @@ async def create_entry(
             rate=tariff.rate,
             currency=tariff.currency,
             amount=amount,
+            coefficient=price.coefficient,
+            coefficient_codes=price.coefficient_codes or None,
+            calc_details=price.details,
             status="pending" if submit else "draft",
             comment=comment or None,
             created_by=actor.user.id,
@@ -150,6 +269,7 @@ async def create_entry(
             "amount": amount,
             "status": entry.status,
             "order_ref": order_ref,
+            "calc": price.details,
         },
         chat_id,
     )
@@ -186,11 +306,18 @@ async def update_draft(
         if performed_on > settings.today():
             raise ValidationError("Дата выполнения не может быть в будущем")
         wt = await session.get(WorkType, entry.work_type_id)
-        tariff, amount = await _price(
-            session, settings, wt, entry.department_id, entry.employee_id, performed_on, entry.quantity
+        price = await price_entry(
+            session,
+            settings,
+            wt,
+            department_id=entry.department_id,
+            employee_id=entry.employee_id,
+            performed_on=performed_on,
+            quantity=entry.quantity,
+            coefficient_codes=entry.coefficient_codes,
         )
         entry.performed_on = performed_on
-        entry.tariff_id, entry.rate, entry.currency, entry.amount = tariff.id, tariff.rate, tariff.currency, amount
+        _apply_price(entry, price)
     if order_ref is not None:
         entry.order_ref = order_ref or None
     if comment is not None:
@@ -234,6 +361,24 @@ async def confirm_entry(
         raise Conflict(f"{entry.number}: подтвердить нельзя, статус — {STATUS_TITLES[entry.status]}")
     _check_confirmer(actor, entry, settings)
     wt = await session.get(WorkType, entry.work_type_id)
+    if (entry.calc_details or {}).get("tiered"):
+        # Ступени считаются от подтверждённого объёма: блокируем сотрудника, чтобы две операции,
+        # подтверждаемые одновременно, не посчитались по одной и той же ступени.
+        await session.execute(select(Employee.id).where(Employee.id == entry.employee_id).with_for_update())
+        tariff = await session.get(Tariff, entry.tariff_id)
+        price = await price_entry(
+            session,
+            settings,
+            wt,
+            department_id=entry.department_id,
+            employee_id=entry.employee_id,
+            performed_on=entry.performed_on,
+            quantity=entry.quantity,
+            coefficient_codes=entry.coefficient_codes,
+            tariff=tariff,
+            exclude_entry_id=entry.id,
+        )
+        _apply_price(entry, price)
     entry.status = "confirmed"
     entry.decided_by = actor.user.id
     entry.decided_at = func.now()
@@ -254,6 +399,9 @@ async def confirm_entry(
             comment=f"{wt.name} × {entry.quantity.normalize():f} {entry.unit_code}",
         )
     await audit(session, actor.user.id, "work.confirm", "work_entry", entry.id, {"amount": entry.amount})
+    if posted is not None and entry.amount > 0:
+        # Выросли начисления периода — можно удержать очередную часть отложенных удержаний.
+        await payroll.apply_withholdings(session, settings, entry.employee_id, entry.currency, actor.user.id)
     return entry, posted, True
 
 
@@ -332,12 +480,21 @@ async def reprice_open_entries(
     wt = await session.get(WorkType, work_type_id)
     changed = 0
     for entry in entries:
-        tariff, amount = await _price(
-            session, settings, wt, entry.department_id, entry.employee_id, entry.performed_on, entry.quantity
+        price = await price_entry(
+            session,
+            settings,
+            wt,
+            department_id=entry.department_id,
+            employee_id=entry.employee_id,
+            performed_on=entry.performed_on,
+            quantity=entry.quantity,
+            coefficient_codes=entry.coefficient_codes,
+            exclude_entry_id=entry.id,
         )
+        tariff, amount = price.tariff, price.amount
         if tariff.id != entry.tariff_id or amount != entry.amount:
             old = {"tariff_id": entry.tariff_id, "amount": entry.amount}
-            entry.tariff_id, entry.rate, entry.currency, entry.amount = tariff.id, tariff.rate, tariff.currency, amount
+            _apply_price(entry, price)
             changed += 1
             await audit(
                 session,

@@ -283,3 +283,65 @@ async def test_money_flow_private_only(h, session):
     assert "Остаток" in out
     out = texts(await h.say(IVAN, "/balance ivan"))
     assert "Остаток" in out  # себя смотреть можно
+
+
+async def test_wizard_survives_restart(h, session, sessionmaker):
+    """Состояние мастера хранится в PostgreSQL: новый экземпляр бота продолжает начатый ввод."""
+    await setup_company(h)
+    emp = (await session.execute(select(Employee).where(Employee.code == "ivan"))).scalar_one()
+    wt = (await session.execute(select(WorkType).where(WorkType.code == "доставка"))).scalar_one()
+    await h.say(OPERATOR, "/op", GROUP)
+    await h.press(OPERATOR, f"opw:e:{emp.id}", GROUP)
+    await h.press(OPERATOR, f"opw:t:{wt.id}", GROUP)
+    restarted = Harness(sessionmaker)  # «перезапуск»: новый диспетчер и новое хранилище
+    out = texts(await restarted.say(OPERATOR, "2 #R-1", GROUP))
+    assert "черновик" in out, out
+    entry = (await session.execute(select(WorkEntry))).scalar_one()
+    assert entry.order_ref == "R-1" and entry.quantity == Decimal(2)
+
+
+async def test_new_pricing_and_stock_commands(h, session):
+    await setup_company(h)
+    for cmd in (
+        "/coef_add срочно 1.5 Срочный заказ",
+        "/tariff доставка 400 dept=north tiers=10:450",
+        "/credit ivan 1000",
+    ):
+        out = texts(await h.say(OWNER, cmd))
+        assert "⚠️" not in out, (cmd, out)
+    assert "ступени" in texts(await h.say(OWNER, "/tariffs доставка")).lower() or "📈" in texts(
+        await h.say(OWNER, "/tariffs доставка")
+    )
+    out = texts(await h.say(OPERATOR, "/op ivan доставка 12 *срочно #C-1", GROUP))
+    assert "срочно" in out
+    entry = (await session.execute(select(WorkEntry))).scalar_one()
+    assert entry.coefficient == Decimal("1.5")
+    await h.press(OWNER, f"w:c:{entry.id}", GROUP)
+    await session.refresh(entry)
+    assert entry.amount == Decimal((10 * 400 + 2 * 450) * 1.5)
+    out = texts(await h.say(IVAN, "/my_salary"))
+    assert "коэф. 1,5" in out and "ступень" in out and "Аванс в долг" in out
+
+    out = texts(await h.say(OPERATOR, "/receive coffee 40 уп cost=1.5", GROUP))
+    assert "⚠️" not in out, out
+    out = texts(await h.say(OWNER, "/batches coffee"))
+    assert "6 USD/кг" in out and "осталось 10 кг" in out
+    out = texts(await h.say(OWNER, "/stock @north"))
+    assert "60,00 USD" in out
+    # в группе себестоимость не видна
+    assert "USD" not in texts(await h.say(OPERATOR, "/stock", GROUP))
+
+    await h.say(OPERATOR, "/issue ivan coffee 4", GROUP)
+    doc = (await session.execute(select(StockDocument).where(StockDocument.doc_type == "issue"))).scalar_one()
+    await h.press(IVAN, f"sd:a:{doc.id}")
+    await h.say(OWNER, "/grant 30 storekeeper north")
+    out = texts(await h.say(OPERATOR, "/inv ivan coffee 3", GROUP))
+    assert "Недостача" in out
+    out = texts(await h.say(OWNER, "/case 1 employee cost"))
+    assert "себестоимость" in out and "6,00" in out
+    out = await h.say(OWNER, "/report stock @north xlsx")
+    assert any(isinstance(c, SendDocument) for c in out)
+
+    # аванс в долг в пределах лимита
+    out = texts(await h.say(OWNER, f"/payout ivan {int(entry.amount) + 500} аванс"))
+    assert "ожидает подтверждения" in out, out

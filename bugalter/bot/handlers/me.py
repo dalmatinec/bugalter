@@ -145,7 +145,13 @@ async def request_payout_button(message: Message, state: FSMContext, session, ac
     lines = []
     for code in (await ledger.balances(session, emp.id)).keys() or [settings.currency]:
         available = await ledger.available(session, emp.id, code)
-        lines.append(await ui.money(session, available, code))
+        line = await ui.money(session, max(available, 0), code)
+        if available < 0:
+            line += f" (долг {await ui.money(session, -available, code)})"
+        credit = await payroll.credit_limit(session, settings, emp.id, code)
+        if credit:
+            line += f", аванс в долг — до {await ui.money(session, credit, code)} сверх этого"
+        lines.append(line)
     await state.set_state(RequestPayout.amount)
     await state.update_data(key=f"req:{uuid.uuid4().hex}")
     notifier.answer(

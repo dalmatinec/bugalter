@@ -21,6 +21,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -80,7 +81,10 @@ class Employee(Base):
 
 class EmployeeDepartment(Base):
     __tablename__ = "employee_departments"
-    __table_args__ = (UniqueConstraint("employee_id", "department_id"),)
+    __table_args__ = (
+        UniqueConstraint("employee_id", "department_id"),
+        Index("ix_employee_departments_dept", "department_id", postgresql_where=text("is_active")),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
@@ -119,6 +123,7 @@ class TelegramChat(Base):
     """Рабочая группа, привязанная к подразделению."""
 
     __tablename__ = "telegram_chats"
+    __table_args__ = (Index("ix_telegram_chats_dept", "department_id", postgresql_where=text("is_active")),)
 
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     title: Mapped[str] = mapped_column(String(256), default="", nullable=False)
@@ -165,7 +170,7 @@ class Unit(Base):
 
 class WorkType(Base):
     __tablename__ = "work_types"
-    __table_args__ = (CheckConstraint("calc_method IN ('per_unit', 'fixed')", name="calc_method"),)
+    __table_args__ = (CheckConstraint("calc_method IN ('per_unit', 'fixed', 'percent')", name="calc_method"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
@@ -198,7 +203,7 @@ class Tariff(Base):
     __tablename__ = "tariffs"
     __table_args__ = (
         CheckConstraint("rate >= 0", name="rate_non_negative"),
-        Index("ix_tariffs_lookup", "work_type_id", "valid_from"),
+        Index("ix_tariffs_lookup", "work_type_id", "employee_id", "department_id", "valid_from"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -213,6 +218,39 @@ class Tariff(Base):
     created_at: Mapped[dt.datetime] = _now_col()
 
 
+class TariffTier(Base):
+    """Ступень шкалы: единицы сверх threshold (накопленно за расчётный период) оплачиваются по rate.
+
+    Первая ступень (от 0) — это Tariff.rate. Строки не изменяются, как и сам тариф.
+    """
+
+    __tablename__ = "tariff_tiers"
+    __table_args__ = (
+        UniqueConstraint("tariff_id", "threshold"),
+        CheckConstraint("threshold > 0", name="threshold_positive"),
+        CheckConstraint("rate >= 0", name="rate_non_negative"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tariff_id: Mapped[int] = mapped_column(ForeignKey("tariffs.id"), nullable=False)
+    threshold: Mapped[Decimal] = mapped_column(QTY, nullable=False)
+    rate: Mapped[Decimal] = mapped_column(RATE, nullable=False)
+
+
+class Coefficient(Base):
+    """Повышающий/понижающий коэффициент к операции: «срочно» ×1,5, «выходной» ×2."""
+
+    __tablename__ = "coefficients"
+    __table_args__ = (CheckConstraint("factor > 0", name="factor_positive"),)
+
+    code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    factor: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    created_by: Mapped[int | None] = _user_fk()
+    created_at: Mapped[dt.datetime] = _now_col()
+
+
 class WorkEntry(Base):
     """Выполненная операция. Ставка и сумма копируются в строку и после подтверждения не меняются."""
 
@@ -220,9 +258,26 @@ class WorkEntry(Base):
     __table_args__ = (
         CheckConstraint("quantity > 0", name="quantity_positive"),
         CheckConstraint("status IN ('draft', 'pending', 'confirmed', 'rejected', 'cancelled')", name="status"),
+        CheckConstraint("coefficient > 0", name="coefficient_positive"),
         Index("ix_work_entries_dept_date", "department_id", "performed_on"),
         Index("ix_work_entries_emp_date", "employee_id", "performed_on"),
-        Index("ix_work_entries_status", "status"),
+        # Очередь на подтверждение и пересчёт после тарифа задним числом — только открытые записи.
+        Index(
+            "ix_work_entries_open",
+            "department_id",
+            "work_type_id",
+            "performed_on",
+            postgresql_where=text("status IN ('draft', 'pending')"),
+        ),
+        # Накопленный объём для ступенчатых тарифов.
+        Index(
+            "ix_work_entries_confirmed_volume",
+            "employee_id",
+            "work_type_id",
+            "department_id",
+            "performed_on",
+            postgresql_where=text("status = 'confirmed'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -238,6 +293,12 @@ class WorkEntry(Base):
     rate: Mapped[Decimal] = mapped_column(RATE, nullable=False)
     currency: Mapped[str] = mapped_column(ForeignKey("currencies.code"), nullable=False)
     amount: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    coefficient: Mapped[Decimal] = mapped_column(
+        Numeric(10, 4), nullable=False, default=Decimal(1), server_default=text("1")
+    )
+    coefficient_codes: Mapped[list[str] | None] = mapped_column(ARRAY(String(32)))
+    # Расшифровка расчёта: куски по ступеням/ставкам, метод, коэффициенты.
+    calc_details: Mapped[dict | None] = mapped_column(JSONB)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     comment: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
@@ -329,8 +390,12 @@ class LedgerEntry(Base):
             "entry_type IN ('work', 'bonus', 'penalty', 'deduction', 'payout', 'reversal')", name="entry_type"
         ),
         Index("ix_ledger_employee", "employee_id", "currency"),
+        Index("ix_ledger_employee_period", "employee_id", "period_id"),
+        Index("ix_ledger_employee_date", "employee_id", "business_date"),
         Index("ix_ledger_period", "period_id"),
+        Index("ix_ledger_dept_date", "department_id", "business_date"),
         Index("ix_ledger_business_date", "business_date"),
+        Index("ix_ledger_reverses", "reverses_id", postgresql_where=text("reverses_id IS NOT NULL")),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -360,6 +425,21 @@ class Adjustment(Base):
             "status IN ('pending', 'awaiting_consent', 'approved', 'rejected', 'disputed', 'cancelled')",
             name="status",
         ),
+        CheckConstraint("withheld >= 0 AND withheld <= amount", name="withheld_range"),
+        Index("ix_adjustments_employee", "employee_id", "business_date"),
+        Index("ix_adjustments_date", "business_date"),
+        Index(
+            "ix_adjustments_open",
+            "department_id",
+            postgresql_where=text("status IN ('pending', 'awaiting_consent', 'disputed')"),
+        ),
+        # Удержания, которые ещё не удержаны полностью (лимит удержаний).
+        Index(
+            "ix_adjustments_outstanding",
+            "employee_id",
+            "currency",
+            postgresql_where=text("status = 'approved' AND kind <> 'bonus' AND withheld < amount"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -380,11 +460,47 @@ class Adjustment(Base):
     decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     decision_comment: Mapped[str | None] = mapped_column(Text)
     consent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Сколько уже удержано (проведено в журнал). При лимите удержаний сумма удерживается частями.
+    withheld: Mapped[Decimal] = mapped_column(MONEY, nullable=False, default=Decimal(0), server_default=text("0"))
 
     @property
     def number(self) -> str:
         prefix = {"bonus": "ПР", "penalty": "ШТ", "deduction": "УД"}[self.kind]
         return f"{prefix}-{self.id:05d}"
+
+    @property
+    def outstanding(self) -> Decimal:
+        return self.amount - self.withheld
+
+
+class AdjustmentInstallment(Base):
+    """Часть удержания, проведённая в журнал в рамках лимита удержаний."""
+
+    __tablename__ = "adjustment_installments"
+    __table_args__ = (
+        UniqueConstraint("adjustment_id", "seq"),
+        CheckConstraint("amount > 0", name="amount_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    adjustment_id: Mapped[int] = mapped_column(ForeignKey("adjustments.id"), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    period_id: Mapped[int] = mapped_column(ForeignKey("payroll_periods.id"), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    created_at: Mapped[dt.datetime] = _now_col()
+
+
+class EmployeeCreditLimit(Base):
+    """Сколько можно выдать сотруднику сверх заработанного (аванс в долг)."""
+
+    __tablename__ = "employee_credit_limits"
+    __table_args__ = (CheckConstraint("amount >= 0", name="amount_non_negative"),)
+
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), primary_key=True)
+    currency: Mapped[str] = mapped_column(ForeignKey("currencies.code"), primary_key=True)
+    amount: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    set_by: Mapped[int | None] = _user_fk()
+    set_at: Mapped[dt.datetime] = _now_col()
 
 
 class Payout(Base):
@@ -393,6 +509,9 @@ class Payout(Base):
         CheckConstraint("amount > 0", name="amount_positive"),
         CheckConstraint("kind IN ('advance', 'salary', 'on_demand')", name="kind"),
         CheckConstraint("status IN ('registered', 'confirmed', 'cancelled')", name="status"),
+        Index("ix_payouts_employee", "employee_id", "business_date"),
+        Index("ix_payouts_date", "business_date"),
+        Index("ix_payouts_registered", "employee_id", postgresql_where=text("status = 'registered'")),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -425,6 +544,7 @@ class PayoutRequest(Base):
     __table_args__ = (
         CheckConstraint("amount > 0", name="amount_positive"),
         CheckConstraint("status IN ('requested', 'approved', 'rejected', 'cancelled')", name="status"),
+        Index("ix_payout_requests_open", "employee_id", postgresql_where=text("status = 'requested'")),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -474,16 +594,28 @@ class ProductUnit(Base):
 
 
 class Batch(Base):
-    """Партия товара. Пока не используется в расчётах — заготовка под учёт себестоимости."""
+    """Партия: создаётся при каждом поступлении. Списание идёт по FIFO, себестоимость — за базовую единицу."""
 
     __tablename__ = "batches"
+    __table_args__ = (
+        Index("ix_batches_fifo", "product_id", "received_on", "id"),
+        CheckConstraint("unit_cost IS NULL OR unit_cost >= 0", name="unit_cost_non_negative"),
+        CheckConstraint("(unit_cost IS NULL) = (currency IS NULL)", name="cost_has_currency"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    department_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"))
+    document_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("stock_documents.id"))
     received_on: Mapped[dt.date] = mapped_column(Date, nullable=False)
-    unit_cost: Mapped[Decimal | None] = mapped_column(MONEY)
+    qty_received: Mapped[Decimal | None] = mapped_column(QTY)
+    unit_cost: Mapped[Decimal | None] = mapped_column(RATE)
     currency: Mapped[str | None] = mapped_column(ForeignKey("currencies.code"))
     created_at: Mapped[dt.datetime] = _now_col()
+
+    @property
+    def number(self) -> str:
+        return f"ПТ-{self.id:05d}"
 
 
 LOCATION_KINDS = ("warehouse", "employee", "transit", "supplier", "customer", "writeoff", "shortage", "surplus")
@@ -499,6 +631,7 @@ class Location(Base):
             "'surplus')",
             name="kind",
         ),
+        Index("ix_locations_employee", "employee_id", postgresql_where=text("employee_id IS NOT NULL")),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -519,6 +652,12 @@ class StockDocument(Base):
         ),
         CheckConstraint("status IN ('posted', 'in_transit', 'completed', 'returned')", name="status"),
         Index("ix_stock_documents_dept", "department_id", "created_at"),
+        Index("ix_stock_documents_in_transit", "id", postgresql_where=text("status = 'in_transit'")),
+        Index(
+            "ix_stock_documents_target_dept",
+            "target_department_id",
+            postgresql_where=text("target_department_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -555,7 +694,10 @@ class StockDocument(Base):
 
 class StockDocumentLine(Base):
     __tablename__ = "stock_document_lines"
-    __table_args__ = (CheckConstraint("qty_base > 0", name="qty_positive"),)
+    __table_args__ = (
+        CheckConstraint("qty_base > 0", name="qty_positive"),
+        Index("ix_stock_document_lines_document", "document_id"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("stock_documents.id"), nullable=False)
@@ -575,6 +717,8 @@ class StockMove(Base):
         CheckConstraint("qty > 0", name="qty_positive"),
         CheckConstraint("from_location_id <> to_location_id", name="different_locations"),
         Index("ix_stock_moves_product", "product_id", "posted_at"),
+        Index("ix_stock_moves_document", "document_id"),
+        Index("ix_stock_moves_posted_at", "posted_at"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -609,6 +753,9 @@ class StockBalance(Base):
             unique=True,
             postgresql_where=text("batch_id IS NOT NULL"),
         ),
+        Index("ix_stock_balances_product", "product_id"),
+        # Остаток места по товару по всем партиям (FIFO, проверка достаточности).
+        Index("ix_stock_balances_location_product", "location_id", "product_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -627,6 +774,7 @@ class DiscrepancyCase(Base):
         CheckConstraint("kind IN ('shortage', 'surplus')", name="kind"),
         CheckConstraint("status IN ('open', 'resolved')", name="status"),
         CheckConstraint("decision IS NULL OR decision IN ('company', 'employee')", name="decision"),
+        Index("ix_discrepancy_cases_open", "department_id", postgresql_where=text("status = 'open'")),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -641,7 +789,7 @@ class DiscrepancyCase(Base):
     counted_qty: Mapped[Decimal] = mapped_column(QTY, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
     decision: Mapped[str | None] = mapped_column(String(16))
-    price: Mapped[Decimal | None] = mapped_column(MONEY)
+    price: Mapped[Decimal | None] = mapped_column(RATE)
     currency: Mapped[str | None] = mapped_column(ForeignKey("currencies.code"))
     amount: Mapped[Decimal | None] = mapped_column(MONEY)
     price_basis: Mapped[str | None] = mapped_column(Text)
@@ -661,7 +809,10 @@ class DiscrepancyCase(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_log"
-    __table_args__ = (Index("ix_audit_entity", "entity_type", "entity_id"),)
+    __table_args__ = (
+        Index("ix_audit_entity", "entity_type", "entity_id"),
+        Index("ix_audit_actor", "actor_user_id", "at"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     at: Mapped[dt.datetime] = _now_col()
@@ -671,3 +822,20 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(64))
     data: Mapped[dict | None] = mapped_column(JSONB)
     chat_id: Mapped[int | None] = mapped_column(BigInteger)
+
+
+# ---------------------------------------------------------------- состояние диалогов
+
+
+class FsmState(Base):
+    """Состояние мастеров ввода aiogram. В БД, чтобы перезапуск бота не сбрасывал незаконченный ввод."""
+
+    __tablename__ = "fsm_states"
+    __table_args__ = (Index("ix_fsm_states_updated", "updated_at"),)
+
+    key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    state: Mapped[str | None] = mapped_column(String(200))
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

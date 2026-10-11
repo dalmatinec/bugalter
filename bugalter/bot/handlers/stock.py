@@ -53,13 +53,14 @@ async def _ask_recipient(session, notifier, doc: StockDocument, card: str):
 
 @router.message(Command("receive"))
 async def receive(
-    message: Message, command: CommandObject, session, actor, chat_dept, notifier, is_private, sessionmaker
+    message: Message, command: CommandObject, session, actor, settings, chat_dept, notifier, is_private, sessionmaker
 ):
-    ex = extract(tokens(command.args))
-    need(ex.rest, 2, "/receive <артикул> <кол-во> [единица] [комментарий]")
+    ex = extract(tokens(command.args), ("cost", "cur"))
+    need(ex.rest, 2, "/receive <артикул> <кол-во> [единица] [cost=цена за единицу] [cur=USD] [комментарий]")
     dept = await resolve_department(session, actor, chat_dept, ex.dept, Perm.STOCK_OPERATE)
     product = await stock.get_product(session, ex.rest[0])
     qty, unit, rest = await _qty_unit(session, ex.rest[1:])
+    unit_cost = parse_decimal(ex.options["cost"], allow_zero=True, what="цену") if ex.options.get("cost") else None
     result = await stock.receive(
         session,
         actor,
@@ -70,6 +71,9 @@ async def receive(
         unit=unit,
         comment=" ".join(rest) or None,
         chat_id=None if is_private else message.chat.id,
+        unit_cost=unit_cost,
+        currency=(ex.options.get("cur") or settings.currency) if unit_cost is not None else None,
+        received_on=settings.today(),
     )
     await _send_card(message, session, notifier, sessionmaker, result, is_private)
 
@@ -276,12 +280,20 @@ async def inventory(message: Message, command: CommandObject, session, actor, ch
 @router.message(Command("case"))
 async def case(message: Message, command: CommandObject, session, actor, settings, notifier):
     items = tokens(command.args)
-    need(items, 2, "/case <№> company | /case <№> employee <цена за баз. единицу> [USD] <основание цены>")
+    need(
+        items,
+        2,
+        "/case <№> company | /case <№> employee cost | /case <№> employee <цена за баз. единицу> [USD] <основание>",
+    )
     case_id = parse_id(items[0])
     decision = items[1].lower()
     price = currency = basis = None
-    if decision == "employee":
-        need(items, 4, "/case <№> employee <цена> [USD] <основание цены>")
+    use_cost = False
+    if decision == "employee" and len(items) > 2 and items[2].lower() in ("cost", "себестоимость"):
+        use_cost = True
+        basis = " ".join(items[3:]) or None
+    elif decision == "employee":
+        need(items, 4, "/case <№> employee <цена> [USD] <основание цены>  или  /case <№> employee cost")
         price = parse_decimal(items[2], what="цену")
         rest = items[3:]
         if rest and rest[0].upper() in await reference.currency_codes(session):
@@ -296,6 +308,7 @@ async def case(message: Message, command: CommandObject, session, actor, setting
         price=price,
         currency=currency,
         price_basis=basis,
+        use_cost=use_cost,
     )
     if adjustment is None:
         notifier.answer(message, f"✅ {result.number}: списано за счёт компании.")
@@ -329,7 +342,9 @@ async def cases(message: Message, command: CommandObject, session, actor, chat_d
 
 
 @router.message(Command("stock"))
-async def stock_balances(message: Message, command: CommandObject, session, actor, chat_dept, notifier):
+async def stock_balances(
+    message: Message, command: CommandObject, session, actor, settings, chat_dept, notifier, is_private
+):
     ex = extract(tokens(command.args))
     dept = await resolve_department(session, actor, chat_dept, ex.dept, Perm.STOCK_OPERATE)
     if not (actor.can(Perm.STOCK_OPERATE, dept.id) or actor.can(Perm.REPORT_VIEW, dept.id)):
@@ -337,14 +352,48 @@ async def stock_balances(message: Message, command: CommandObject, session, acto
     emp = await org.get_employee(session, ex.rest[0]) if ex.rest else None
     rows = await stock.balances(session, department_id=dept.id, employee_id=emp.id if emp else None)
     lines = [f"📦 <b>Остатки {h(dept.code)}</b>" + (f" · {h(emp.full_name)}" if emp else "")]
+    # Себестоимость — денежные данные: в группе показываем только при group_show_amounts.
+    show_value = is_private or settings.group_show_amounts
     current = None
     for row in rows:
         if row.location_title != current:
             current = row.location_title
             lines.append(f"\n<u>{h(current)}</u>")
-        lines.append(f"• {h(row.product.name)}: {fmt_qty(row.qty, row.product.base_unit)}")
+        line = f"• {h(row.product.name)}: {fmt_qty(row.qty, row.product.base_unit)}"
+        if show_value and row.value is not None:
+            line += f" · {fmt_number(row.value, 2)} {row.currency}"
+            if row.unvalued_qty:
+                line += f" (+{fmt_qty(row.unvalued_qty, row.product.base_unit)} без цены)"
+        lines.append(line)
     if len(lines) == 1:
         lines.append("Пусто.")
+    notifier.answer(message, "\n".join(lines))
+
+
+@router.message(Command("batches"))
+async def batches(message: Message, command: CommandObject, session, actor, notifier, is_private):
+    if not is_private:
+        raise ValidationError("Себестоимость партий показывается только в личном чате с ботом")
+    if not (actor.can_anywhere(Perm.STOCK_MANAGE) or actor.can_anywhere(Perm.REPORT_VIEW)):
+        raise AccessDenied("Недостаточно прав")
+    items = tokens(command.args)
+    need(items, 1, "/batches <артикул>")
+    product = await stock.get_product(session, items[0])
+    rows = await stock.product_batches(session, product)
+    lines = [f"📦 <b>Партии: {h(product.name)}</b> (новые сверху, списание по FIFO — со старых)"]
+    for batch, remaining in rows:
+        cost = (
+            f"{fmt_number(batch.unit_cost)} {batch.currency}/{product.base_unit}"
+            if batch.unit_cost is not None
+            else "без цены"
+        )
+        received = fmt_qty(batch.qty_received, product.base_unit) if batch.qty_received is not None else "—"
+        lines.append(
+            f"• {batch.number} от {batch.received_on:%d.%m.%Y}: пришло {received}, "
+            f"осталось {fmt_qty(remaining, product.base_unit)} · {cost}"
+        )
+    if len(lines) == 1:
+        lines.append("Партий нет.")
     notifier.answer(message, "\n".join(lines))
 
 

@@ -28,6 +28,7 @@ from ..db.models import (
 )
 from ..domain.money import fmt_number
 from . import payroll, stock
+from .settings import get_settings
 from .work import STATUS_TITLES
 
 
@@ -238,9 +239,29 @@ async def operations_report(
 
 
 async def stock_report(session: AsyncSession, department: Department) -> Table:
-    table = Table(title=f"Остатки {department.code}", headers=["Где", "Артикул", "Товар", "Кол-во", "Ед."])
+    """Остатки по местам с оценкой по себестоимости партий (FIFO)."""
+    table = Table(
+        title=f"Остатки {department.code}",
+        headers=["Где", "Артикул", "Товар", "Кол-во", "Ед.", "Себестоимость", "Валюта", "Без цены"],
+    )
+    totals: dict[str, Decimal] = defaultdict(Decimal)
     for row in await stock.balances(session, department_id=department.id):
-        table.rows.append([row.location_title, row.product.sku, row.product.name, row.qty, row.product.base_unit])
+        table.rows.append(
+            [
+                row.location_title,
+                row.product.sku,
+                row.product.name,
+                row.qty,
+                row.product.base_unit,
+                row.value,
+                row.currency or "",
+                row.unvalued_qty or None,
+            ]
+        )
+        if row.value is not None:
+            totals[row.currency] += row.value
+    for cur, value in sorted(totals.items()):
+        table.rows.append(["ИТОГО", "", "", None, "", value, cur, None])
     cases = await stock.open_cases(session, department.id)
     for case in cases:
         table.notes.append(f"Открытое расхождение {case.number}: {case.kind} {fmt_number(case.qty)}")
@@ -252,9 +273,21 @@ async def moves_report(
 ) -> Table:
     table = Table(
         title=f"Движение товара {department.code}: {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}",
-        headers=["Время", "Документ", "Тип", "Товар", "Откуда", "Куда", "Кол-во", "Ед."],
+        headers=[
+            "Время",
+            "Документ",
+            "Тип",
+            "Товар",
+            "Откуда",
+            "Куда",
+            "Кол-во",
+            "Ед.",
+            "Партия",
+            "Себестоимость",
+            "Валюта",
+        ],
     )
-    for move, doc, product in await stock.moves(
+    for move, doc, product, batch in await stock.moves(
         session, department_id=department.id, date_from=date_from, date_to=date_to, tz=tz
     ):
         src = await session.get(Location, move.from_location_id)
@@ -269,6 +302,11 @@ async def moves_report(
                 await stock.describe_location(session, dst),
                 move.qty,
                 product.base_unit,
+                batch.number if batch else "",
+                (move.qty * batch.unit_cost).quantize(Decimal("0.01"))
+                if batch and batch.unit_cost is not None
+                else None,
+                batch.currency if batch and batch.currency else "",
             ]
         )
     return table
@@ -343,11 +381,14 @@ async def adjustments_report(
 
 async def balances_report(session: AsyncSession, department_ids: set[int] | None) -> Table:
     """Задолженности: кому компания должна (+) и кто должен компании (−)."""
-    table = Table(title="Остатки взаиморасчётов", headers=["Сотрудник", "Код", "Остаток", "Валюта", "Состояние"])
+    table = Table(
+        title="Остатки взаиморасчётов",
+        headers=["Сотрудник", "Код", "Остаток", "Валюта", "Состояние", "Ещё удержать", "Лимит аванса"],
+    )
     query = (
-        select(Employee.full_name, Employee.code, LedgerEntry.currency, func.sum(LedgerEntry.amount))
+        select(Employee.id, Employee.full_name, Employee.code, LedgerEntry.currency, func.sum(LedgerEntry.amount))
         .join(Employee, Employee.id == LedgerEntry.employee_id)
-        .group_by(Employee.full_name, Employee.code, LedgerEntry.currency)
+        .group_by(Employee.id, Employee.full_name, Employee.code, LedgerEntry.currency)
         .having(func.sum(LedgerEntry.amount) != 0)
         .order_by(func.sum(LedgerEntry.amount))
     )
@@ -356,8 +397,13 @@ async def balances_report(session: AsyncSession, department_ids: set[int] | None
             EmployeeDepartment.department_id.in_(department_ids or {-1})
         )
         query = query.where(LedgerEntry.employee_id.in_(members))
-    for name, code, cur, total in (await session.execute(query)).all():
-        table.rows.append([name, code, total, cur, "долг сотрудника" if total < 0 else "к выплате"])
+    settings = await get_settings(session)
+    for emp_id, name, code, cur, total in (await session.execute(query)).all():
+        outstanding = (await payroll.outstanding_withholdings(session, emp_id)).get(cur)
+        credit = await payroll.credit_limit(session, settings, emp_id, cur)
+        table.rows.append(
+            [name, code, total, cur, "долг сотрудника" if total < 0 else "к выплате", outstanding, credit or None]
+        )
     return table
 
 

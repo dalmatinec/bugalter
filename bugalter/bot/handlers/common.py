@@ -19,16 +19,18 @@ HELP_EMPLOYEE = """<b>Личный кабинет</b> (только в личк�
 
 HELP_GROUP = """<b>В рабочей группе</b>
 /op — внести операцию (мастер с кнопками)
-/op &lt;сотрудник&gt; &lt;работа&gt; &lt;кол-во&gt; [#заказ] [вчера|ДД.ММ] [комментарий] — быстрый ввод
+/op &lt;сотрудник&gt; &lt;работа&gt; &lt;кол-во&gt; [#заказ] [вчера|ДД.ММ] [*коэффициент] [комментарий] — быстрый ввод (/coefs — список коэффициентов)
 /pending — ждут подтверждения · /ops [сегодня|неделя|месяц] — сводка
 /cancel_op &lt;№&gt; &lt;причина&gt; · /reject_op &lt;№&gt; &lt;причина&gt;
-<b>Склад</b>: /receive /issue /move /send /return /sold /writeoff /inv /stock /transit /cases"""
+<b>Склад</b>: /receive &lt;артикул&gt; &lt;кол-во&gt; [ед.] [cost=цена] · /issue /move /send /return /sold /writeoff /inv /stock /transit /cases"""
 
 HELP_MANAGER = """<b>Деньги</b> (только в личке)
 /bonus /penalty /deduct &lt;сотрудник&gt; &lt;сумма&gt; [USD] &lt;основание&gt; — выписать
 /adjs — на подпись · /adj_cancel &lt;№&gt; &lt;причина&gt;
 /payout &lt;сотрудник&gt; &lt;сумма&gt; [USD] [аванс|зп] [комментарий] · /payouts · /payout_cancel &lt;№&gt; &lt;причина&gt;
 /requests — запросы выплат · /balance &lt;сотрудник&gt; [прошлый|период]
+/credit &lt;сотрудник&gt; &lt;лимит&gt; — аванс в долг · /credits
+/case &lt;№&gt; employee cost — недостача по себестоимости · /batches &lt;артикул&gt; — партии
 /periods · /period_close &lt;№&gt; · /period_reopen &lt;№&gt; &lt;причина&gt; (владелец)
 <b>Отчёты</b>: /report emp|dept|ops|stock|moves|payouts|adj|debts … [период] [xlsx|csv]
 <b>Настройка</b>: /admin"""

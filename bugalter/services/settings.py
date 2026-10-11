@@ -2,6 +2,7 @@
 
 import datetime as dt
 from dataclasses import dataclass
+from decimal import Decimal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
@@ -10,14 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import Currency, Setting
 from ..domain.errors import ValidationError
-from ..domain.money import ROUNDING_MODES
+from ..domain.money import ROUNDING_MODES, parse_decimal
 from .audit import audit
 
 
 @dataclass(frozen=True)
 class SettingSpec:
     default: str
-    kind: str  # bool | int | str | currency | rounding | timezone
+    kind: str  # bool | int | str | currency | rounding | timezone | percent | decimal
     title: str
 
 
@@ -33,9 +34,16 @@ SPECS: dict[str, SettingSpec] = {
     "payout_requires_confirmation": SettingSpec(
         "true", "bool", "Выплата попадает в расчёт только после отдельного подтверждения"
     ),
-    "allow_negative_balance": SettingSpec("false", "bool", "Разрешить выплату сверх заработанного (аванс в долг)"),
+    "default_credit_limit": SettingSpec(
+        "0", "decimal", "Аванс в долг по умолчанию: сколько можно выдать сверх заработанного (0 — нельзя)"
+    ),
     "deduction_requires_consent": SettingSpec(
         "false", "bool", "Штраф/удержание проводится только после согласия сотрудника в боте"
+    ),
+    "deduction_limit_percent": SettingSpec(
+        "-",
+        "percent",
+        "Лимит удержаний за период, % от начислений периода; остаток удерживается в следующих (- — без лимита)",
     ),
 }
 
@@ -52,8 +60,9 @@ class Settings:
     group_show_amounts: bool
     allow_self_confirm: bool
     payout_requires_confirmation: bool
-    allow_negative_balance: bool
+    default_credit_limit: Decimal
     deduction_requires_consent: bool
+    deduction_limit_percent: Decimal | None
     # Только для тестов: зафиксированная дата «сегодня».
     today_override: dt.date | None = None
 
@@ -96,6 +105,15 @@ def _parse(key: str, raw: str):
         return value
     if spec.kind == "currency":
         return value.upper()
+    if spec.kind == "percent":
+        if value in ("-", "", "нет", "no", "off"):
+            return None
+        number = parse_decimal(value.rstrip("%"), allow_zero=True, max_scale=2, what=key)
+        if number > 100:
+            raise ValidationError(f"{key}: от 0 до 100")
+        return number
+    if spec.kind == "decimal":
+        return parse_decimal(value, allow_zero=True, max_scale=4, what=key)
     return value
 
 
@@ -120,7 +138,14 @@ async def set_setting(session: AsyncSession, actor, key: str, raw: str) -> str:
     value = _parse(key, raw)
     if SPECS[key].kind == "currency" and await session.get(Currency, value) is None:
         raise ValidationError(f"Валюта {value} не заведена. Добавьте: /currency_add {value} 2 Название")
-    stored = str(value).lower() if isinstance(value, bool) else str(value)
+    if value is None:
+        stored = "-"
+    elif isinstance(value, bool):
+        stored = str(value).lower()
+    elif isinstance(value, Decimal):
+        stored = format(value.normalize(), "f")
+    else:
+        stored = str(value)
     old = await session.get(Setting, key)
     stmt = insert(Setting).values(key=key, value=stored, updated_by=actor.user.id)
     stmt = stmt.on_conflict_do_update(index_elements=[Setting.key], set_={"value": stored, "updated_by": actor.user.id})

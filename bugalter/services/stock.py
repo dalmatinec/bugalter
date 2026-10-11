@@ -11,12 +11,13 @@ import datetime as dt
 from dataclasses import dataclass
 from decimal import Decimal
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import (
     VIRTUAL_LOCATION_KINDS,
+    Batch,
     Department,
     DiscrepancyCase,
     Employee,
@@ -159,44 +160,88 @@ async def location(session: AsyncSession, kind: str, department_id: int, employe
 
 
 async def balance(session: AsyncSession, location_id: int, product_id: int, lock: bool = False) -> Decimal:
-    query = select(StockBalance.qty).where(
-        StockBalance.location_id == location_id, StockBalance.product_id == product_id, StockBalance.batch_id.is_(None)
-    )
+    """Остаток товара в месте (по всем партиям)."""
     if lock:
-        query = query.with_for_update()
-    return (await session.execute(query)).scalar_one_or_none() or Decimal(0)
+        rows = (await _lock_rows(session, location_id, product_id)).values()
+        return sum((r.qty for r in rows), Decimal(0))
+    total = (
+        await session.execute(
+            select(func.coalesce(func.sum(StockBalance.qty), 0)).where(
+                StockBalance.location_id == location_id, StockBalance.product_id == product_id
+            )
+        )
+    ).scalar_one()
+    return total
 
 
-async def _apply(session: AsyncSession, loc: Location, product_id: int, delta: Decimal) -> None:
+async def _lock_rows(session: AsyncSession, location_id: int, product_id: int) -> dict[int | None, StockBalance]:
+    rows = (
+        await session.execute(
+            select(StockBalance)
+            .where(StockBalance.location_id == location_id, StockBalance.product_id == product_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalars()
+    return {row.batch_id: row for row in rows}
+
+
+async def _apply(session: AsyncSession, loc: Location, product_id: int, batch_id: int | None, delta: Decimal) -> None:
     virtual = loc.kind in VIRTUAL_LOCATION_KINDS
+    batch_filter = StockBalance.batch_id.is_(None) if batch_id is None else StockBalance.batch_id == batch_id
     if delta < 0 and not virtual:
         # Списание с реального места — только UPDATE существующей строки: при INSERT … ON CONFLICT
         # PostgreSQL проверяет CHECK (qty >= 0) на предлагаемой отрицательной строке ещё до конфликта.
         result = await session.execute(
             update(StockBalance)
-            .where(
-                StockBalance.location_id == loc.id,
-                StockBalance.product_id == product_id,
-                StockBalance.batch_id.is_(None),
-            )
+            .where(StockBalance.location_id == loc.id, StockBalance.product_id == product_id, batch_filter)
             .values(qty=StockBalance.qty + delta)
         )
         if result.rowcount != 1:
-            raise InsufficientStock("Нет остатка для списания")
+            raise InsufficientStock("Нет остатка партии для списания")
         return
     stmt = insert(StockBalance).values(
-        location_id=loc.id,
-        product_id=product_id,
-        batch_id=None,
-        qty=delta,
-        allow_negative=virtual,
+        location_id=loc.id, product_id=product_id, batch_id=batch_id, qty=delta, allow_negative=virtual
     )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["location_id", "product_id"],
-        index_where=text("batch_id IS NULL"),
-        set_={"qty": StockBalance.qty + delta},
-    )
+    if batch_id is None:
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["location_id", "product_id"],
+            index_where=text("batch_id IS NULL"),
+            set_={"qty": StockBalance.qty + delta},
+        )
+    else:
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["location_id", "product_id", "batch_id"],
+            index_where=text("batch_id IS NOT NULL"),
+            set_={"qty": StockBalance.qty + delta},
+        )
     await session.execute(stmt)
+
+
+async def _fifo(
+    session: AsyncSession, src: Location, product: Product, qty: Decimal
+) -> list[tuple[int | None, Decimal]]:
+    """Какие партии списать: сначала без партии (остатки до учёта партий), затем старые."""
+    rows = (
+        await session.execute(
+            select(StockBalance.batch_id, StockBalance.qty)
+            .outerjoin(Batch, Batch.id == StockBalance.batch_id)
+            .where(StockBalance.location_id == src.id, StockBalance.product_id == product.id, StockBalance.qty > 0)
+            .order_by(StockBalance.batch_id.isnot(None), Batch.received_on, Batch.id)
+        )
+    ).all()
+    allocations = []
+    left = qty
+    for batch_id, available in rows:
+        if left <= 0:
+            break
+        take = min(available, left)
+        allocations.append((batch_id, take))
+        left -= take
+    return allocations
+
+
+Allocation = list[tuple[int | None, Decimal]]
 
 
 async def _move(
@@ -207,30 +252,58 @@ async def _move(
     dst: Location,
     qty: Decimal,
     user_id: int,
-) -> None:
-    if src.kind not in VIRTUAL_LOCATION_KINDS:
-        # Блокируем строки остатков в одном порядке (по id места), чтобы параллельные движения не взаимоблокировались.
+    *,
+    batch_id: int | None = None,
+    allocations: Allocation | None = None,
+) -> Allocation:
+    """Движение товара. Из реального места — по FIFO (или ровно по allocations), из условного — партией batch_id."""
+    if src.kind in VIRTUAL_LOCATION_KINDS:
+        allocations = allocations or [(batch_id, qty)]
+    else:
+        # Блокируем строки остатков обоих мест в одном порядке (по id места) — без взаимоблокировок.
         for loc in sorted((src, dst), key=lambda x: x.id):
             if loc.kind not in VIRTUAL_LOCATION_KINDS:
-                await balance(session, loc.id, product.id, lock=True)
+                await _lock_rows(session, loc.id, product.id)
         have = await balance(session, src.id, product.id)
         if have < qty:
             raise InsufficientStock(
                 f"Недостаточно «{product.name}» ({await describe_location(session, src)}): "
                 f"есть {fmt_qty(have, product.base_unit)}, нужно {fmt_qty(qty, product.base_unit)}"
             )
-    session.add(
-        StockMove(
-            document_id=doc.id,
-            product_id=product.id,
-            from_location_id=src.id,
-            to_location_id=dst.id,
-            qty=qty,
-            posted_by=user_id,
+        if allocations is None:
+            allocations = await _fifo(session, src, product, qty)
+    for alloc_batch, alloc_qty in allocations:
+        session.add(
+            StockMove(
+                document_id=doc.id,
+                product_id=product.id,
+                batch_id=alloc_batch,
+                from_location_id=src.id,
+                to_location_id=dst.id,
+                qty=alloc_qty,
+                posted_by=user_id,
+            )
         )
-    )
-    await _apply(session, src, product.id, -qty)
-    await _apply(session, dst, product.id, qty)
+        await _apply(session, src, product.id, alloc_batch, -alloc_qty)
+        await _apply(session, dst, product.id, alloc_batch, alloc_qty)
+    return allocations
+
+
+async def _doc_allocations(session: AsyncSession, doc: StockDocument, line: StockDocumentLine) -> Allocation:
+    """Какие партии ушли «в пути» по этой строке документа."""
+    rows = (
+        await session.execute(
+            select(StockMove.batch_id, func.sum(StockMove.qty))
+            .where(
+                StockMove.document_id == doc.id,
+                StockMove.product_id == line.product_id,
+                StockMove.from_location_id == line.from_location_id,
+                StockMove.to_location_id == line.to_location_id,
+            )
+            .group_by(StockMove.batch_id)
+        )
+    ).all()
+    return [(batch_id, qty) for batch_id, qty in rows]
 
 
 async def describe_location(session: AsyncSession, loc: Location) -> str:
@@ -301,6 +374,7 @@ async def _simple_doc(
     final: Location | None = None,
     perm: str = Perm.STOCK_OPERATE,
     chat_id: int | None = None,
+    new_batch: dict | None = None,
     **extra,
 ) -> DocResult:
     existing = await _existing_doc(session, key)
@@ -326,7 +400,27 @@ async def _simple_doc(
             final_location_id=final.id if final else None,
         )
     )
-    await _move(session, doc, product, src, dst, qty_base, actor.user.id)
+    batch_id = None
+    if new_batch is not None:
+        unit_cost = new_batch.get("unit_cost")
+        cost_base = None
+        if unit_cost is not None:
+            # Цена введена за единицу ввода (например, за упаковку) — храним за базовую единицу.
+            cost_base = (unit_cost * qty / qty_base).quantize(Decimal("0.000001"))
+        batch = Batch(
+            product_id=product.id,
+            department_id=department.id,
+            document_id=doc.id,
+            received_on=new_batch["received_on"],
+            qty_received=qty_base,
+            unit_cost=cost_base,
+            currency=new_batch.get("currency") if cost_base is not None else None,
+        )
+        session.add(batch)
+        await session.flush()
+        batch_id = batch.id
+        extra = {**extra, "batch_id": batch_id, "unit_cost": cost_base, "currency": batch.currency}
+    await _move(session, doc, product, src, dst, qty_base, actor.user.id, batch_id=batch_id)
     await audit(
         session,
         actor.user.id,
@@ -352,7 +446,28 @@ async def _member(session: AsyncSession, employee: Employee, department: Departm
         raise ValidationError(f"{employee.full_name} не состоит в подразделении {department.code}")
 
 
-async def receive(session, actor, *, key, department, product, qty, unit=None, comment=None, chat_id=None) -> DocResult:
+async def receive(
+    session,
+    actor,
+    *,
+    key,
+    department,
+    product,
+    qty,
+    unit=None,
+    comment=None,
+    chat_id=None,
+    unit_cost: Decimal | None = None,
+    currency: str | None = None,
+    received_on: dt.date | None = None,
+) -> DocResult:
+    """Поступление создаёт партию. unit_cost — цена за единицу ввода (за «уп», если вводили в упаковках)."""
+    if unit_cost is not None:
+        if unit_cost < 0:
+            raise ValidationError("Цена не может быть отрицательной")
+        if not currency:
+            raise ValidationError("Для цены поступления нужна валюта")
+        await reference.get_currency(session, currency)
     return await _simple_doc(
         session,
         actor,
@@ -366,6 +481,11 @@ async def receive(session, actor, *, key, department, product, qty, unit=None, c
         dst=await location(session, "warehouse", department.id),
         comment=comment,
         chat_id=chat_id,
+        new_batch={
+            "unit_cost": unit_cost,
+            "currency": currency.upper() if currency else None,
+            "received_on": received_on or dt.datetime.now(dt.UTC).date(),
+        },
     )
 
 
@@ -523,7 +643,7 @@ async def accept(session: AsyncSession, actor, document_id: int) -> tuple[StockD
     if not _can_accept(actor, doc):
         raise AccessDenied("Подтвердить получение может получатель или оператор с правом подтверждения")
     lines = (await session.execute(select(StockDocumentLine).where(StockDocumentLine.document_id == doc.id))).scalars()
-    for line in lines:
+    for line in list(lines):
         product = await session.get(Product, line.product_id)
         await _move(
             session,
@@ -533,6 +653,7 @@ async def accept(session: AsyncSession, actor, document_id: int) -> tuple[StockD
             await session.get(Location, line.final_location_id),
             line.qty_base,
             actor.user.id,
+            allocations=await _doc_allocations(session, doc, line),
         )
     doc.status = "completed"
     doc.accepted_by = actor.user.id
@@ -553,7 +674,7 @@ async def decline(session: AsyncSession, actor, document_id: int, reason: str | 
     if not (_can_accept(actor, doc) or actor.can(Perm.STOCK_OPERATE, doc.department_id)):
         raise AccessDenied("Недостаточно прав")
     lines = (await session.execute(select(StockDocumentLine).where(StockDocumentLine.document_id == doc.id))).scalars()
-    for line in lines:
+    for line in list(lines):
         product = await session.get(Product, line.product_id)
         await _move(
             session,
@@ -563,6 +684,7 @@ async def decline(session: AsyncSession, actor, document_id: int, reason: str | 
             await session.get(Location, line.from_location_id),
             line.qty_base,
             actor.user.id,
+            allocations=await _doc_allocations(session, doc, line),
         )
     doc.status = "returned"
     doc.accepted_by = actor.user.id
@@ -699,8 +821,12 @@ async def decide_case(
     currency: str | None = None,
     price_basis: str | None = None,
     comment: str | None = None,
+    use_cost: bool = False,
 ):
-    """Решение по расхождению. «employee» создаёт документ удержания, который ещё нужно подписать."""
+    """Решение по расхождению. «employee» создаёт документ удержания, который ещё нужно подписать.
+
+    use_cost=True — цена берётся из себестоимости партий, ушедших в недостачу (FIFO).
+    """
     case = await session.get(DiscrepancyCase, case_id, with_for_update=True, populate_existing=True)
     if case is None:
         raise NotFound(f"Расхождение #{case_id} не найдено")
@@ -717,14 +843,26 @@ async def decide_case(
             raise ValidationError("Недостача на складе не закреплена за сотрудником — решение только «company»")
         if actor.is_self(case.employee_id) and not actor.is_owner:
             raise AccessDenied("Нельзя решать расхождение по себе")
-        if price is None or price <= 0:
-            raise ValidationError("Укажите цену за базовую единицу товара")
-        if not price_basis or not price_basis.strip():
-            raise ValidationError("Укажите основание цены (закупочная, продажная, по договорённости…)")
-        currency_code = (currency or settings.currency).upper()
-        cur = await reference.get_currency(session, currency_code)
         product = await session.get(Product, case.product_id)
-        amount = round_to_step(case.qty * price, currency_step(cur.minor_units), settings.rounding_mode)
+        if use_cost:
+            total_cost, cost_currency = await case_cost(session, case)
+            if total_cost is None:
+                raise ValidationError(
+                    "Себестоимость недостачи неизвестна (у части партий нет цены поступления) — укажите цену вручную"
+                )
+            currency_code = cost_currency
+            cur = await reference.get_currency(session, currency_code)
+            amount = round_to_step(total_cost, currency_step(cur.minor_units), settings.rounding_mode)
+            price = (total_cost / case.qty).quantize(Decimal("0.000001"))
+            price_basis = (price_basis or "").strip() or "себестоимость по партиям (FIFO)"
+        else:
+            if price is None or price <= 0:
+                raise ValidationError("Укажите цену за базовую единицу товара или «cost» — по себестоимости")
+            if not price_basis or not price_basis.strip():
+                raise ValidationError("Укажите основание цены (закупочная, продажная, по договорённости…)")
+            currency_code = (currency or settings.currency).upper()
+            cur = await reference.get_currency(session, currency_code)
+            amount = round_to_step(case.qty * price, currency_step(cur.minor_units), settings.rounding_mode)
         employee = await session.get(Employee, case.employee_id)
         adjustment, _ = await payroll.create_adjustment(
             session,
@@ -760,6 +898,24 @@ async def decide_case(
     return case, adjustment
 
 
+async def case_cost(session: AsyncSession, case: DiscrepancyCase) -> tuple[Decimal | None, str | None]:
+    """Себестоимость товара, ушедшего в недостачу по документу инвентаризации."""
+    shortage = await location(session, "shortage", case.department_id)
+    rows = (
+        await session.execute(
+            select(StockMove.qty, Batch.unit_cost, Batch.currency)
+            .outerjoin(Batch, Batch.id == StockMove.batch_id)
+            .where(StockMove.document_id == case.document_id, StockMove.to_location_id == shortage.id)
+        )
+    ).all()
+    if not rows or any(cost is None for _, cost, _ in rows):
+        return None, None
+    currencies = {cur for _, _, cur in rows}
+    if len(currencies) != 1:
+        return None, None
+    return sum((qty * cost for qty, cost, _ in rows), Decimal(0)), currencies.pop()
+
+
 async def open_cases(session: AsyncSession, department_id: int | None = None) -> list[DiscrepancyCase]:
     query = select(DiscrepancyCase).where(DiscrepancyCase.status == "open").order_by(DiscrepancyCase.id)
     if department_id is not None:
@@ -791,6 +947,9 @@ class BalanceRow:
     location_title: str
     product: Product
     qty: Decimal
+    value: Decimal | None = None
+    currency: str | None = None
+    unvalued_qty: Decimal = Decimal(0)
 
 
 async def balances(
@@ -800,11 +959,24 @@ async def balances(
     employee_id: int | None = None,
     include_virtual: bool = False,
 ) -> list[BalanceRow]:
+    """Остатки по местам и товарам (партии сложены) с оценкой по себестоимости партий."""
+    has_cost = Batch.unit_cost.isnot(None)
     query = (
-        select(StockBalance, Location, Product)
+        select(
+            Location,
+            Product,
+            func.sum(StockBalance.qty),
+            func.sum(case((has_cost, StockBalance.qty * Batch.unit_cost), else_=0)),
+            func.sum(case((has_cost, 0), else_=StockBalance.qty)),
+            func.min(Batch.currency),
+            func.count(func.distinct(Batch.currency)),
+        )
+        .select_from(StockBalance)
         .join(Location, Location.id == StockBalance.location_id)
         .join(Product, Product.id == StockBalance.product_id)
-        .where(StockBalance.qty != 0)
+        .outerjoin(Batch, Batch.id == StockBalance.batch_id)
+        .group_by(Location.id, Product.id)
+        .having(func.sum(StockBalance.qty) != 0)
         .order_by(Location.department_id, Location.kind, Location.employee_id, Product.sku)
     )
     if department_id is not None:
@@ -814,19 +986,32 @@ async def balances(
     if not include_virtual:
         query = query.where(Location.kind.notin_(tuple(VIRTUAL_LOCATION_KINDS)))
     result = []
-    for bal, loc, product in (await session.execute(query)).all():
-        result.append(BalanceRow(loc, await describe_location(session, loc), product, bal.qty))
+    for loc, product, qty, value, unvalued, currency, currencies in (await session.execute(query)).all():
+        valued = currencies == 1 and value is not None
+        result.append(
+            BalanceRow(
+                loc,
+                await describe_location(session, loc),
+                product,
+                qty,
+                value if valued else None,
+                currency if valued else None,
+                unvalued,
+            )
+        )
     return result
 
 
 async def moves(
     session: AsyncSession, *, department_id: int, date_from: dt.date, date_to: dt.date, tz: str
 ) -> list[tuple]:
+    """Движения за даты (по часовому поясу компании) с партией для оценки по себестоимости."""
     local_date = func.date(func.timezone(tz, StockMove.posted_at))
     query = (
-        select(StockMove, StockDocument, Product)
+        select(StockMove, StockDocument, Product, Batch)
         .join(StockDocument, StockDocument.id == StockMove.document_id)
         .join(Product, Product.id == StockMove.product_id)
+        .outerjoin(Batch, Batch.id == StockMove.batch_id)
         .where(
             (StockDocument.department_id == department_id) | (StockDocument.target_department_id == department_id),
             local_date.between(date_from, date_to),
@@ -834,6 +1019,27 @@ async def moves(
         .order_by(StockMove.id)
     )
     return [tuple(r) for r in (await session.execute(query)).all()]
+
+
+async def product_batches(session: AsyncSession, product: Product) -> list[tuple[Batch, Decimal]]:
+    """Партии товара и их текущий остаток на реальных местах (склад, сотрудники, в пути)."""
+    remaining = (
+        select(StockBalance.batch_id, func.sum(StockBalance.qty).label("qty"))
+        .join(Location, Location.id == StockBalance.location_id)
+        .where(StockBalance.product_id == product.id, Location.kind.notin_(tuple(VIRTUAL_LOCATION_KINDS)))
+        .group_by(StockBalance.batch_id)
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(Batch, func.coalesce(remaining.c.qty, 0))
+            .outerjoin(remaining, remaining.c.batch_id == Batch.id)
+            .where(Batch.product_id == product.id)
+            .order_by(Batch.received_on.desc(), Batch.id.desc())
+            .limit(30)
+        )
+    ).all()
+    return [(b, q) for b, q in rows]
 
 
 async def pending_transfers(session: AsyncSession, actor) -> list[StockDocument]:
@@ -852,16 +1058,17 @@ async def verify_balances(session: AsyncSession) -> list[tuple[int, int, Decimal
             text(
                 """
                 WITH flows AS (
-                    SELECT to_location_id AS location_id, product_id, qty FROM stock_moves
+                    SELECT to_location_id AS location_id, product_id, batch_id, qty FROM stock_moves
                     UNION ALL
-                    SELECT from_location_id, product_id, -qty FROM stock_moves
+                    SELECT from_location_id, product_id, batch_id, -qty FROM stock_moves
                 ), totals AS (
-                    SELECT location_id, product_id, SUM(qty) AS qty FROM flows GROUP BY 1, 2
+                    SELECT location_id, product_id, batch_id, SUM(qty) AS qty FROM flows GROUP BY 1, 2, 3
                 )
                 SELECT COALESCE(t.location_id, b.location_id), COALESCE(t.product_id, b.product_id),
                        COALESCE(t.qty, 0), COALESCE(b.qty, 0)
                 FROM totals t
                 FULL JOIN stock_balances b ON b.location_id = t.location_id AND b.product_id = t.product_id
+                    AND b.batch_id IS NOT DISTINCT FROM t.batch_id
                 WHERE COALESCE(t.qty, 0) <> COALESCE(b.qty, 0)
                 """
             )
