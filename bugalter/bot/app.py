@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..config import Config, get_config
 from ..db.session import make_engine, make_sessionmaker
 from ..logs import setup_logging
-from ..services import access, reference
+from ..services import access, org, reference
 from .handlers import admin, common, me, panel, payroll, reports, stock, work
 from .middlewares import ContextMiddleware
 from .storage import PostgresStorage
@@ -67,6 +67,7 @@ def build_dispatcher(sessionmaker: async_sessionmaker[AsyncSession], config: Con
 async def bootstrap(sessionmaker: async_sessionmaker[AsyncSession], config: Config) -> None:
     async with sessionmaker() as session, session.begin():
         await reference.ensure_reference_data(session)
+        await org.ensure_default_department(session)
         for telegram_id in config.owner_telegram_ids:
             await access.ensure_owner(session, telegram_id)
     removed = await PostgresStorage(sessionmaker).cleanup()

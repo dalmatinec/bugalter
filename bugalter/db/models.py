@@ -144,6 +144,8 @@ class EmployeeInvite(Base):
 
     token: Mapped[str] = mapped_column(String(40), primary_key=True)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
+    # Роль, которая выдаётся сотруднику автоматически при подключении по ссылке (NULL — только личный кабинет).
+    role_code: Mapped[str | None] = mapped_column(ForeignKey("roles.code"))
     created_by: Mapped[int | None] = _user_fk()
     created_at: Mapped[dt.datetime] = _now_col()
     expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

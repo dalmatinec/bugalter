@@ -58,10 +58,13 @@ async def resolve_department(
         return await org.get_department(session, code)
     if chat_dept is not None:
         return chat_dept
+    single = await org.single_department(session)
+    if single is not None:
+        return single
     ids = actor.departments_with(perm)
     if ids is not None and len(ids) == 1:
         return await session.get(Department, next(iter(ids)))
-    raise ValidationError("Укажите подразделение: @код (список — /depts) или выполните команду в рабочей группе")
+    raise ValidationError("Укажите филиал: @название (например @север) или выполните команду в рабочей группе")
 
 
 @dataclass

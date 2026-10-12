@@ -349,13 +349,39 @@ async def unique_code(session: AsyncSession, column, text: str) -> str:
     return code
 
 
-async def create_invite(session: AsyncSession, actor, employee: Employee, days: int = 7) -> str:
+DEFAULT_DEPARTMENT = ("main", "Основное")
+
+
+async def ensure_default_department(session: AsyncSession) -> None:
+    """Одна точка создаётся сама: пока филиал один, бот о нём не спрашивает."""
+    if (await session.execute(select(Department.id).limit(1))).first() is None:
+        code, name = DEFAULT_DEPARTMENT
+        session.add(Department(code=code, name=name))
+        await audit(session, None, "org.department_create", "department", code, {"default": True})
+
+
+async def active_departments(session: AsyncSession) -> list[Department]:
+    return list(
+        (await session.execute(select(Department).where(Department.is_active).order_by(Department.id))).scalars()
+    )
+
+
+async def single_department(session: AsyncSession) -> Department | None:
+    """Если точка одна — она; иначе None (надо выбирать)."""
+    depts = await active_departments(session)
+    return depts[0] if len(depts) == 1 else None
+
+
+async def create_invite(
+    session: AsyncSession, actor, employee: Employee, days: int = 7, role_code: str | None = None
+) -> str:
     await _require_org_for_employee(session, actor, employee)
     token = secrets.token_urlsafe(18)
     session.add(
         EmployeeInvite(
             token=token,
             employee_id=employee.id,
+            role_code=role_code,
             created_by=actor.user.id,
             expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(days=days),
         )
