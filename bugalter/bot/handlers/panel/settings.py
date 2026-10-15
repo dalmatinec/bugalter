@@ -6,7 +6,7 @@ from aiogram.types import CallbackQuery
 from sqlalchemy import func, select
 
 from ....db.models import Tariff
-from ....domain.money import currency_label, fmt_money, fmt_number
+from ....domain.money import currency_label, fmt_number
 from ....services import reference
 from ....services import settings as settings_service
 from ....services.settings import SPECS
@@ -64,7 +64,6 @@ async def settings_view(settings):
         if settings.deduction_limit_percent is not None
         else "нет"
     )
-    credit = fmt_money(settings.default_credit_limit, settings.currency) if settings.default_credit_limit else "нельзя"
     lines = [
         "⚙️ <b>Настройки</b>",
         "",
@@ -73,7 +72,6 @@ async def settings_view(settings):
         f"📅 Расчётные периоды: <b>1-{settings.payroll_split_day} и {settings.payroll_split_day + 1}-конец месяца</b>",
         f"🔢 Округление: <b>{ROUNDING_TITLES.get(settings.rounding_mode, settings.rounding_mode)}</b>",
         f"📉 Лимит удержаний: <b>{limit}</b>",
-        f"💳 Аванс в долг по умолчанию: <b>{credit}</b>",
     ]
     lines.append("")
     for key, (title, _short) in TOGGLES.items():
@@ -81,7 +79,7 @@ async def settings_view(settings):
     rows = [
         [("💱 Валюта", "p:s:cur"), ("🕐 Часовой пояс", "p:s:tz")],
         [("📅 Периоды", "p:s:split"), ("🔢 Округление", "p:s:rnd")],
-        [("📉 Лимит удержаний", "p:s:lim"), ("💳 Аванс в долг", "p:s:cr")],
+        [("📉 Лимит удержаний", "p:s:lim")],
     ]
     toggles = [
         (f"{'✅' if getattr(settings, key) else '⬜️'} {short}", f"p:s:t:{key}") for key, (_, short) in TOGGLES.items()
@@ -179,18 +177,6 @@ async def settings_limit(callback: CallbackQuery, notifier):
         "📉 Сколько процентов от начислений периода можно удержать штрафами/удержаниями? "
         "Остальное удержится из следующих начислений.",
         kb(grid),
-    )
-
-
-@router.callback_query(F.data == "p:s:cr")
-async def settings_credit(callback: CallbackQuery, state: FSMContext, notifier):
-    await ask(state, "setting", key="default_credit_limit")
-    show(
-        callback,
-        notifier,
-        "💳 Сколько по умолчанию можно выдать сверх заработанного? Напишите число (0 значит нельзя).\n"
-        "Каждому сотруднику можно задать своё в его карточке.",
-        cancel_kb("p:s"),
     )
 
 

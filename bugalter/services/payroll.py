@@ -18,7 +18,6 @@ from ..db.models import (
     AdjustmentInstallment,
     Currency,
     Employee,
-    EmployeeCreditLimit,
     LedgerEntry,
     Payout,
     PayoutRequest,
@@ -33,7 +32,7 @@ from ..domain.money import currency_step, fmt_money, round_to_step, scale_of
 from ..domain.permissions import Perm
 from . import ledger, org
 from .audit import audit
-from .settings import Settings, get_settings
+from .settings import Settings
 
 ADJ_TITLES = {"bonus": "Премия", "penalty": "Штраф", "deduction": "Удержание"}
 ADJ_STATUS_TITLES = {
@@ -464,7 +463,10 @@ async def register_payout(
     department_id: int | None = None,
     request_id: int | None = None,
     business_date: dt.date | None = None,
+    allow_extra: Decimal = Decimal(0),
 ) -> tuple[Payout, bool]:
+    """Аванс — любая сумма. Зарплата — не больше того, что сотруднику должны (allow_extra: сверх этого
+    можно, когда руководитель решил вычесть аванс не сейчас, а в следующий раз)."""
     existing = (
         await session.execute(select(Payout).where(Payout.idempotency_key == idempotency_key))
     ).scalar_one_or_none()
@@ -480,10 +482,10 @@ async def register_payout(
     cur = await _check_amount(session, amount, currency_code)
     # Блокируем строку сотрудника, чтобы две параллельные выплаты не прошли проверку остатка одновременно.
     await session.execute(select(Employee.id).where(Employee.id == employee.id).with_for_update())
-    can_pay = await ledger.available(session, employee.id, currency_code, exclude_request_id=request_id)
-    credit = Decimal(0) if kind == "salary" else await credit_limit(session, settings, employee.id, currency_code)
-    if amount > can_pay + credit:
-        raise InsufficientFunds(_funds_message(can_pay, credit, currency_code, cur.minor_units, kind))
+    if kind == "salary":
+        can_pay = await ledger.available(session, employee.id, currency_code, exclude_request_id=request_id)
+        if amount > can_pay + allow_extra:
+            raise InsufficientFunds(_funds_message(can_pay + allow_extra, currency_code, cur.minor_units))
     stmt = (
         insert(Payout)
         .values(
@@ -572,6 +574,17 @@ async def confirm_payout(
     return payout, entry, True
 
 
+async def confirm_if_allowed(session: AsyncSession, actor, settings: Settings, payout: Payout) -> bool:
+    """Если тот, кто записал выплату, сам может её подтвердить (обычно владелец), проводим сразу."""
+    if payout.status != "registered":
+        return False
+    try:
+        await confirm_payout(session, actor, settings, payout.id)
+    except AccessDenied:
+        return False
+    return True
+
+
 async def cancel_payout(
     session: AsyncSession, actor, settings: Settings, payout_id: int, reason: str
 ) -> tuple[Payout, LedgerEntry | None]:
@@ -611,62 +624,139 @@ async def registered_payouts(session: AsyncSession, actor) -> list[tuple[Payout,
     return [tuple(r) for r in (await session.execute(query)).all()]
 
 
-def _funds_message(can_pay: Decimal, credit: Decimal, currency: str, minor: int, kind: str) -> str:
-    text = f"Доступно к выплате {fmt_money(max(can_pay, Decimal(0)), currency, minor)}"
+def _funds_message(can_pay: Decimal, currency: str, minor: int) -> str:
+    text = f"Зарплатой можно выплатить {fmt_money(max(can_pay, Decimal(0)), currency, minor)}"
     if can_pay < 0:
-        text += f" (долг {fmt_money(-can_pay, currency, minor)})"
-    if kind == "salary":
-        return text + ". Сверх заработанного можно выдать только аванс или выплату по запросу"
-    if credit > 0:
-        return text + f", аванс в долг: до {fmt_money(credit, currency, minor)} сверх этого"
-    return text + ". Аванс в долг сотруднику не разрешён: включите его в карточке сотрудника"
+        text += f" (сотрудник должен {fmt_money(-can_pay, currency, minor)})"
+    return text + ". Больше заработанного выдаётся авансом, он потом вычитается из зарплаты"
 
 
-async def credit_limit(session: AsyncSession, settings: Settings, employee_id: int, currency: str) -> Decimal:
-    """Сколько можно выдать сверх заработанного: индивидуальный лимит или default_credit_limit."""
-    row = await session.get(EmployeeCreditLimit, (employee_id, currency))
-    return row.amount if row is not None else settings.default_credit_limit
+# ------------------------------------------------------------------ авансы и зарплата
+
+ADVANCE_KINDS = ("advance", "on_demand")
 
 
-async def set_credit_limit(
-    session: AsyncSession, actor, settings: Settings, employee: Employee, amount: Decimal, currency: str | None
-) -> EmployeeCreditLimit:
-    department_id = await org.default_department_id(session, employee.id)
-    actor.require(Perm.PAYROLL_SIGN, department_id)
-    if actor.is_self(employee.id) and not actor.is_owner:
-        raise AccessDenied("Нельзя менять кредитный лимит себе")
-    currency_code = (currency or settings.currency).upper()
-    cur = await _currency(session, currency_code)
-    if amount < 0 or scale_of(amount) > cur.minor_units:
-        raise ValidationError("Лимит должен быть неотрицательной суммой в валюте")
-    stmt = insert(EmployeeCreditLimit).values(
-        employee_id=employee.id, currency=currency_code, amount=amount, set_by=actor.user.id
+async def outstanding_advance(session: AsyncSession, employee_id: int, currency: str) -> Decimal:
+    """Сколько выдано авансом и ещё не вычтено из зарплаты."""
+    value = await session.scalar(
+        select(func.coalesce(func.sum(Payout.amount - Payout.settled), 0)).where(
+            Payout.employee_id == employee_id,
+            Payout.currency == currency,
+            Payout.kind.in_(ADVANCE_KINDS),
+            Payout.status == "confirmed",
+        )
     )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["employee_id", "currency"],
-        set_={"amount": amount, "set_by": actor.user.id, "set_at": func.now()},
-    )
-    await session.execute(stmt)
-    await audit(
-        session,
-        actor.user.id,
-        "payroll.credit_limit",
-        "employee",
-        employee.id,
-        {"amount": amount, "currency": currency_code},
-    )
-    return await session.get(EmployeeCreditLimit, (employee.id, currency_code), populate_existing=True)
+    return Decimal(value)
 
 
-async def list_credit_limits(session: AsyncSession) -> list[tuple[EmployeeCreditLimit, Employee]]:
+@dataclass(frozen=True)
+class SalaryPreview:
+    currency: str
+    # Что сотруднику должны прямо сейчас: заработанное минус всё выданное, включая авансы.
+    balance: Decimal
+    # Выдано авансом и ещё не вычтено из зарплаты.
+    advance: Decimal
+
+    @property
+    def earned(self) -> Decimal:
+        """Заработано и ещё не выплачено зарплатой (без учёта аванса)."""
+        return max(self.balance + self.advance, Decimal(0))
+
+    @property
+    def with_deduction(self) -> Decimal:
+        return max(self.balance, Decimal(0))
+
+    @property
+    def deducted_now(self) -> Decimal:
+        """Сколько аванса уйдёт в вычет, если вычитать сейчас: не больше заработанного."""
+        return min(self.advance, self.earned)
+
+    @property
+    def advance_left(self) -> Decimal:
+        return self.advance - self.deducted_now
+
+
+async def salary_preview(session: AsyncSession, employee_id: int, currency: str) -> SalaryPreview:
+    return SalaryPreview(
+        currency=currency,
+        balance=await ledger.available(session, employee_id, currency),
+        advance=await outstanding_advance(session, employee_id, currency),
+    )
+
+
+async def _settle_advances(session: AsyncSession, employee_id: int, currency: str, amount: Decimal) -> None:
+    """Отмечает аванс вычтенным: сначала самые старые."""
     rows = (
         await session.execute(
-            select(EmployeeCreditLimit, Employee)
-            .join(Employee, Employee.id == EmployeeCreditLimit.employee_id)
-            .order_by(Employee.full_name)
+            select(Payout)
+            .where(
+                Payout.employee_id == employee_id,
+                Payout.currency == currency,
+                Payout.kind.in_(ADVANCE_KINDS),
+                Payout.status == "confirmed",
+                Payout.settled < Payout.amount,
+            )
+            .order_by(Payout.business_date, Payout.id)
+            .with_for_update()
         )
-    ).all()
-    return [tuple(r) for r in rows]
+    ).scalars()
+    left = amount
+    for payout in rows:
+        if left <= 0:
+            break
+        take = min(payout.amount - payout.settled, left)
+        payout.settled += take
+        left -= take
+
+
+async def pay_salary(
+    session: AsyncSession,
+    actor,
+    settings: Settings,
+    *,
+    employee: Employee,
+    deduct_advance: bool,
+    idempotency_key: str,
+    currency: str | None = None,
+) -> tuple[Payout | None, Decimal]:
+    """Зарплата: всё заработанное, с вычетом аванса или без (тогда аванс вычтется в следующий раз).
+
+    Возвращает (выплата или None, если после вычета платить нечего; сколько аванса вычтено).
+    """
+    currency_code = (currency or settings.currency).upper()
+    department_id = await _department_for(session, employee.id, None)
+    actor.require(Perm.PAYROLL_PAYOUT, department_id)
+    await session.execute(select(Employee.id).where(Employee.id == employee.id).with_for_update())
+    preview = await salary_preview(session, employee.id, currency_code)
+    if preview.earned <= 0:
+        raise ValidationError("Выплачивать нечего: всё заработанное уже выдано")
+    deducted = preview.deducted_now if deduct_advance else Decimal(0)
+    amount = preview.earned - deducted
+    payout = None
+    if amount > 0:
+        payout, _ = await register_payout(
+            session,
+            actor,
+            settings,
+            employee=employee,
+            amount=amount,
+            currency=currency_code,
+            kind="salary",
+            idempotency_key=idempotency_key,
+            comment=f"вычтен аванс {fmt_money(deducted, currency_code)}" if deducted else None,
+            allow_extra=Decimal(0) if deduct_advance else preview.advance,
+        )
+    if deducted > 0:
+        await _settle_advances(session, employee.id, currency_code, deducted)
+        await audit(
+            session,
+            actor.user.id,
+            "payroll.advance_deduct",
+            "employee",
+            employee.id,
+            {"amount": deducted, "currency": currency_code},
+        )
+    return payout, deducted
 
 
 # ------------------------------------------------------------------ запросы выплат
@@ -691,12 +781,7 @@ async def request_payout(
         return existing, False
     employee = actor.employee
     currency_code = (currency or settings.currency).upper()
-    cur = await _check_amount(session, amount, currency_code)
-    await session.execute(select(Employee.id).where(Employee.id == employee.id).with_for_update())
-    can_pay = await ledger.available(session, employee.id, currency_code)
-    credit = await credit_limit(session, settings, employee.id, currency_code)
-    if amount > can_pay + credit:
-        raise InsufficientFunds(_funds_message(can_pay, credit, currency_code, cur.minor_units, "on_demand"))
+    await _check_amount(session, amount, currency_code)
     req = PayoutRequest(
         idempotency_key=idempotency_key,
         employee_id=employee.id,
@@ -733,7 +818,7 @@ async def decide_request(
             employee=employee,
             amount=req.amount,
             currency=req.currency,
-            kind="on_demand",
+            kind="advance",
             idempotency_key=f"request:{req.id}",
             comment=req.comment,
             request_id=req.id,
@@ -990,8 +1075,8 @@ class CurrencyStatement:
     reserved: Decimal = Decimal(0)
     # Подписанные штрафы/удержания, которые ещё будут удержаны (лимит удержаний).
     outstanding_withholding: Decimal = Decimal(0)
-    # Сколько можно выдать сверх заработанного (аванс в долг).
-    credit_limit: Decimal = Decimal(0)
+    # Выдано авансом и ещё не вычтено из зарплаты.
+    advance: Decimal = Decimal(0)
     work_lines: list[WorkLine] = field(default_factory=list)
     other_lines: list[OtherLine] = field(default_factory=list)
 
@@ -1118,9 +1203,8 @@ async def build_statement(
             cs(code).reserved = amount
         for code, amount in (await outstanding_withholdings(session, employee.id)).items():
             cs(code).outstanding_withholding = amount
-        settings_row = await get_settings(session)
         for code, st in currencies.items():
-            st.credit_limit = await credit_limit(session, settings_row, employee.id, code)
+            st.advance = await outstanding_advance(session, employee.id, code)
 
     return Statement(employee, title, date_from, date_to, period, currencies)
 

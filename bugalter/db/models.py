@@ -510,23 +510,11 @@ class AdjustmentInstallment(Base):
     created_at: Mapped[dt.datetime] = _now_col()
 
 
-class EmployeeCreditLimit(Base):
-    """Сколько можно выдать сотруднику сверх заработанного (аванс в долг)."""
-
-    __tablename__ = "employee_credit_limits"
-    __table_args__ = (CheckConstraint("amount >= 0", name="amount_non_negative"),)
-
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), primary_key=True)
-    currency: Mapped[str] = mapped_column(ForeignKey("currencies.code"), primary_key=True)
-    amount: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
-    set_by: Mapped[int | None] = _user_fk()
-    set_at: Mapped[dt.datetime] = _now_col()
-
-
 class Payout(Base):
     __tablename__ = "payouts"
     __table_args__ = (
         CheckConstraint("amount > 0", name="amount_positive"),
+        CheckConstraint("settled >= 0 AND settled <= amount", name="settled_range"),
         CheckConstraint("kind IN ('advance', 'salary', 'on_demand')", name="kind"),
         CheckConstraint("status IN ('registered', 'confirmed', 'cancelled')", name="status"),
         Index("ix_payouts_employee", "employee_id", "business_date"),
@@ -541,6 +529,8 @@ class Payout(Base):
     amount: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
     currency: Mapped[str] = mapped_column(ForeignKey("currencies.code"), nullable=False)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Для аванса: сколько из него уже вычтено из зарплаты (руководитель решает, когда вычитать).
+    settled: Mapped[Decimal] = mapped_column(MONEY, nullable=False, default=0, server_default=text("0"))
     method: Mapped[str | None] = mapped_column(String(64))
     comment: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="registered")

@@ -239,6 +239,8 @@ async def request_action(callback: CallbackQuery, session, actor, settings, noti
         notifier.edit(callback.message, await ui.request_card(session, req))
         return
     req, p = await payroll.decide_request(session, actor, settings, int(req_id), action == "a")
+    if p is not None:
+        await payroll.confirm_if_allowed(session, actor, settings, p)
     notifier.toast(callback, "Одобрено" if req.status == "approved" else "Отклонено")
     text = await ui.request_card(session, req)
     markup = None

@@ -283,8 +283,8 @@ async def test_money_flow_private_only(h, session):
     await session.refresh(adj)
     assert adj.status == "approved"
 
-    out = texts(await h.say(OWNER, "/payout ivan 9999 аванс"))
-    assert "Доступно к выплате" in out
+    out = texts(await h.say(OWNER, "/payout ivan 9999 зп"))
+    assert "Зарплатой можно выплатить" in out  # зарплатой больше заработанного нельзя, авансом можно
     out = texts(await h.say(OWNER, "/payout ivan 1000 аванс наличными"))
     assert "ожидает подтверждения" in out
     payout = (await session.execute(select(Payout))).scalar_one()
@@ -342,7 +342,6 @@ async def test_new_pricing_and_stock_commands(h, session):
         valid_from=None,
         tiers=[(Decimal(10), Decimal(450))],
     )
-    await payroll.set_credit_limit(session, owner, settings, emp, Decimal(1000), "USD")
     await session.commit()
 
     tariff_row = (
@@ -360,7 +359,7 @@ async def test_new_pricing_and_stock_commands(h, session):
     await session.refresh(entry)
     assert entry.amount == Decimal((10 * 400 + 2 * 450) * 1.5)
     out = texts(await h.say(IVAN, "/my_salary"))
-    assert "коэф. 1,5" in out and "ступень" in out and "Аванс в долг" in out
+    assert "коэф. 1,5" in out and "ступень" in out
 
     out = texts(await h.say(OPERATOR, "/receive coffee 40 уп cost=1.5", GROUP))
     assert "⚠️" not in out, out
@@ -384,7 +383,7 @@ async def test_new_pricing_and_stock_commands(h, session):
     out = await h.say(OWNER, "/report stock xlsx")
     assert any(isinstance(c, SendDocument) for c in out)
 
-    # аванс в долг в пределах лимита
+    # аванс больше заработанного
     out = texts(await h.say(OWNER, f"/payout ivan {int(entry.amount) + 500} аванс"))
     assert "ожидает подтверждения" in out, out
 
@@ -405,7 +404,7 @@ async def test_admin_panel_simple_setup(h, session):
     out = await h.press(OWNER, "p:first:USD")
     markup = next(c.reply_markup for c in out if getattr(c, "reply_markup", None))
     labels = [b.text for row in markup.inline_keyboard for b in row]
-    assert labels == ["👥 Сотрудники", "💰 Работы и цены", "💬 Группы", "➕ Ещё"]
+    assert labels == ["👥 Сотрудники", "💰 Работы и цены", "💸 Выплаты", "💬 Группы", "➕ Ещё"]
     out = await h.say(OWNER, "⚙️ Управление")
     assert [b.text for row in out[-1].reply_markup.inline_keyboard for b in row] == labels
     dept = (await session.execute(select(Department))).scalar_one()  # создана автоматически
@@ -522,3 +521,50 @@ async def test_tag_report_in_group(h, session):
     await session.commit()
     out = texts(await h.say(IVAN, "#погрузка 2", GROUP))
     assert "Нет цены на Погрузка" in out
+
+
+async def test_payouts_panel_advance_and_salary(h, session):
+    """Аванс кнопками любой суммой, в день зарплаты вычесть его или оставить на потом."""
+    _, emp = await setup_company(h, session)
+    owner = await access.load_actor(session, OWNER)
+    delivery = (await session.execute(select(WorkType).where(WorkType.code == "доставка"))).scalar_one()
+    for n in (1, 2):  # заработал 800
+        res = await work.create_entry(
+            session,
+            owner,
+            await get_settings(session),
+            idempotency_key=f"p{n}",
+            department_id=(await session.execute(select(Department))).scalar_one().id,
+            employee_id=emp.id,
+            work_type_id=delivery.id,
+            quantity=Decimal(1),
+        )
+        await work.confirm_entry(session, owner, await get_settings(session), res.entry.id)
+    await session.commit()
+
+    out = texts(await h.press(OWNER, "p:pay"))
+    assert "Иван Иванов</b>: заработано $800,00" in out
+    await h.press(OWNER, f"p:pay:adv:{emp.id}")
+    out = await h.say(OWNER, "1000")
+    assert "✅ Выдано. Аванс $1\u202f000,00" in texts(out)
+    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "выдан аванс" in c.text for c in out)
+    out = texts(await h.press(OWNER, f"p:pay:v:{emp.id}"))
+    assert (
+        "Аванс, ещё не вычтен: $1\u202f000,00" in out
+        and "С вычетом аванса: к выплате $0,00" in out
+        and "Без вычета: к выплате $800,00" in out
+    )
+
+    # Без вычета: выплачиваем заработанное, аванс остаётся
+    out = texts(await h.press(OWNER, f"p:pay:s:{emp.id}:0"))
+    assert "Точно выплатить $800,00" in out
+    nonce_kb = next(
+        c.reply_markup for c in await h.press(OWNER, f"p:pay:s:{emp.id}:0") if isinstance(c, EditMessageText)
+    )
+    ok = nonce_kb.inline_keyboard[0][0].callback_data
+    out = texts(await h.press(OWNER, ok))
+    assert "Зарплата $800,00" in out
+    assert await payroll.outstanding_advance(session, emp.id, "USD") == Decimal(1000)
+    # Повторное нажатие той же кнопки ничего не выплачивает
+    await h.press(OWNER, ok)
+    assert any("нечего" in a for a in h.tg.alerts())

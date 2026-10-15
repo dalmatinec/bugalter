@@ -32,7 +32,7 @@ STATUS_ICONS = {"draft": "📝", "pending": "⏳", "confirmed": "✅", "rejected
 BTN_MY_WORK = "📊 Моя работа"
 BTN_MY_SALARY = "💰 Мой расчёт"
 BTN_MY_STOCK = "📦 Мои товары"
-BTN_REQUEST = "💸 Запросить выплату"
+BTN_REQUEST = "💸 Попросить аванс"
 BTN_MY_PAYOUTS = "🧾 Мои выплаты"
 BTN_HELP = "❓ Помощь"
 BTN_PANEL = "⚙️ Управление"
@@ -289,7 +289,7 @@ async def request_card(session: AsyncSession, req: PayoutRequest) -> str:
         "cancelled": "🚫 отменён",
     }[req.status]
     text = (
-        f"🙋 <b>{req.number}</b> · запрос выплаты\n👤 {h(emp.full_name)}\n"
+        f"🙋 <b>{req.number}</b> · просит аванс\n👤 {h(emp.full_name)}\n"
         f"💰 <b>{await money(session, req.amount, req.currency)}</b>\n{status}"
     )
     if req.comment:
@@ -351,6 +351,6 @@ def statement_text(st: payroll.Statement, with_available: bool = False) -> str:
             lines.append(f"🔒 В обработке выплат: {m(cs.reserved)}; доступно: {m(cs.available)}")
         if with_available and cs.outstanding_withholding:
             lines.append(f"⏳ Ещё будет удержано (лимит удержаний): {m(cs.outstanding_withholding)}")
-        if with_available and cs.credit_limit:
-            lines.append(f"💳 Аванс в долг: до {m(cs.credit_limit)} сверх доступного")
+        if with_available and cs.advance:
+            lines.append(f"💵 Аванс, ещё не вычтен из зарплаты: {m(cs.advance)}")
     return "\n".join(lines)

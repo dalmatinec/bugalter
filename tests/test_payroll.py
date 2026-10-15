@@ -168,7 +168,7 @@ async def test_deduction_consent_flow(world, session, settings):
     assert await ledger.balances(session, w.ivan.id) == {"USD": D("-200")}
 
 
-async def test_payout_cannot_exceed_balance(world, session, settings):
+async def test_salary_cannot_exceed_balance(world, session, settings):
     w = world
     await w.tariff(w.delivery, "100", d(1), dept=w.north)
     await op(w, settings, w.petr, w.delivery, "3", d(20))
@@ -180,7 +180,7 @@ async def test_payout_cannot_exceed_balance(world, session, settings):
             employee=w.petr,
             amount=D("301"),
             currency="USD",
-            kind="advance",
+            kind="salary",
             idempotency_key=key(),
         )
     p, _ = await payroll.register_payout(
@@ -190,7 +190,7 @@ async def test_payout_cannot_exceed_balance(world, session, settings):
         employee=w.petr,
         amount=D("200"),
         currency="USD",
-        kind="advance",
+        kind="salary",
         idempotency_key=key(),
     )
     # зарегистрированная, но не подтверждённая выплата уже резервирует деньги
@@ -202,11 +202,10 @@ async def test_payout_cannot_exceed_balance(world, session, settings):
             employee=w.petr,
             amount=D("150"),
             currency="USD",
-            kind="advance",
+            kind="salary",
             idempotency_key=key(),
         )
-    # Аванс в долг: по умолчанию лимит 0, после установки лимита — можно сверх заработанного.
-    await payroll.set_credit_limit(session, w.manager, settings, w.petr, D("100"), "USD")
+    # Аванс выдаётся любой суммой, сверх заработанного тоже
     await payroll.register_payout(
         session,
         w.accountant,
@@ -281,10 +280,11 @@ async def test_payout_request_flow(world, session, settings):
         session, w.ivan_actor, settings, amount=D("300"), currency="USD", comment="на карту", idempotency_key="r1"
     )
     assert not again
-    with pytest.raises(InsufficientFunds):  # 500 − 300 зарезервировано
-        await payroll.request_payout(
-            session, w.ivan_actor, settings, amount=D("201"), currency="USD", comment=None, idempotency_key="r2"
-        )
+    # Просить аванс можно любой суммой, решает руководитель
+    big, _ = await payroll.request_payout(
+        session, w.ivan_actor, settings, amount=D("5000"), currency="USD", comment=None, idempotency_key="r2"
+    )
+    await payroll.decide_request(session, w.owner, settings, big.id, False)
     req, payout = await payroll.decide_request(session, w.accountant, settings, req.id, True)
     assert req.status == "approved" and payout.status == "registered" and payout.amount == D("300")
     with pytest.raises(AccessDenied):  # подтвердить выплату может только владелец

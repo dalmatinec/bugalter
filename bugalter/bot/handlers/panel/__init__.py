@@ -5,7 +5,20 @@
 
 from aiogram import Router
 
-from . import access, coefficients, departments, employees, forms, groups, home, journal, products, settings, works
+from . import (
+    access,
+    coefficients,
+    departments,
+    employees,
+    forms,
+    groups,
+    home,
+    journal,
+    payouts,
+    products,
+    settings,
+    works,
+)
 from .base import can_admin
 from .employees import accept_invite_start
 
@@ -14,6 +27,7 @@ router = Router(name="panel")
 router.include_routers(
     home.router,
     employees.router,
+    payouts.router,
     access.router,
     works.router,
     coefficients.router,

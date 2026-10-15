@@ -121,12 +121,12 @@ async def _create_request(message, session, actor, settings, notifier, amount_te
     kb = InlineKeyboardBuilder()
     if req.status == "requested":
         kb.button(text="🚫 Отменить запрос", callback_data=f"rq:x:{req.id}")
-    notifier.answer(message, "Запрос отправлен:\n" + await ui.request_card(session, req), kb.as_markup())
+    notifier.answer(message, "Просьба отправлена:\n" + await ui.request_card(session, req), kb.as_markup())
     if created:
         dept = await org.default_department_id(session, actor.employee.id)
         card = await ui.request_card(session, req)
         for user in await access.users_with_perm(session, Perm.PAYROLL_PAYOUT, dept):
-            notifier.send(user.telegram_id, "Новый запрос выплаты:\n" + card, ui.request_kb(req))
+            notifier.send(user.telegram_id, "Сотрудник просит аванс:\n" + card, ui.request_kb(req))
 
 
 @router.message(Command("request_payout"))
@@ -142,21 +142,16 @@ async def request_payout_cmd(message: Message, command: CommandObject, session, 
 @router.message(F.text == ui.BTN_REQUEST)
 async def request_payout_button(message: Message, state: FSMContext, session, actor, settings, notifier, is_private):
     emp = _me(actor, is_private)
-    lines = []
-    for code in (await ledger.balances(session, emp.id)).keys() or [settings.currency]:
-        available = await ledger.available(session, emp.id, code)
-        line = await ui.money(session, max(available, 0), code)
-        if available < 0:
-            line += f" (долг {await ui.money(session, -available, code)})"
-        credit = await payroll.credit_limit(session, settings, emp.id, code)
-        if credit:
-            line += f", аванс в долг до {await ui.money(session, credit, code)} сверх этого"
-        lines.append(line)
+    preview = await payroll.salary_preview(session, emp.id, settings.currency)
+    lines = [f"💰 Заработано, ещё не выплачено: {await ui.money(session, preview.earned, settings.currency)}"]
+    if preview.advance:
+        lines.append(f"💵 Аванс уже взят, не вычтен: {await ui.money(session, preview.advance, settings.currency)}")
     await state.set_state(RequestPayout.amount)
     await state.update_data(key=f"req:{uuid.uuid4().hex}")
     notifier.answer(
         message,
-        "Доступно к выплате: " + ", ".join(lines) + "\nНапишите сумму (и при желании комментарий). /cancel: отмена",
+        "\n".join(lines) + "\n\nСколько нужно? Можно больше заработанного: аванс потом вычтется из зарплаты.\n"
+        "Напишите сумму (и при желании комментарий). /cancel: отмена",
     )
 
 

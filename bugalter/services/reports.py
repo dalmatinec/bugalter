@@ -28,7 +28,6 @@ from ..db.models import (
 )
 from ..domain.money import fmt_number
 from . import payroll, stock
-from .settings import get_settings
 from .work import STATUS_TITLES
 
 
@@ -383,7 +382,7 @@ async def balances_report(session: AsyncSession, department_ids: set[int] | None
     """Задолженности: кому компания должна (+) и кто должен компании (−)."""
     table = Table(
         title="Остатки взаиморасчётов",
-        headers=["Сотрудник", "Код", "Остаток", "Валюта", "Состояние", "Ещё удержать", "Лимит аванса"],
+        headers=["Сотрудник", "Код", "Остаток", "Валюта", "Состояние", "Ещё удержать", "Аванс не вычтен"],
     )
     query = (
         select(Employee.id, Employee.full_name, Employee.code, LedgerEntry.currency, func.sum(LedgerEntry.amount))
@@ -397,12 +396,11 @@ async def balances_report(session: AsyncSession, department_ids: set[int] | None
             EmployeeDepartment.department_id.in_(department_ids or {-1})
         )
         query = query.where(LedgerEntry.employee_id.in_(members))
-    settings = await get_settings(session)
     for emp_id, name, code, cur, total in (await session.execute(query)).all():
         outstanding = (await payroll.outstanding_withholdings(session, emp_id)).get(cur)
-        credit = await payroll.credit_limit(session, settings, emp_id, cur)
+        advance = await payroll.outstanding_advance(session, emp_id, cur)
         table.rows.append(
-            [name, code, total, cur, "долг сотрудника" if total < 0 else "к выплате", outstanding, credit or None]
+            [name, code, total, cur, "долг сотрудника" if total < 0 else "к выплате", outstanding, advance or None]
         )
     return table
 

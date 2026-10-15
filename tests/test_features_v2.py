@@ -224,64 +224,70 @@ async def test_without_limit_deduction_is_posted_at_once(world, session, setting
     assert posted.amount == D(-300) and fine.outstanding == 0
 
 
-# ------------------------------------------------------------------ авансы в долг
+# ------------------------------------------------------------------ аванс и зарплата
 
 
-async def test_advance_on_credit_and_repayment(world, session, settings):
+async def test_advance_any_amount_and_deduction_at_payday(world, session, settings):
+    """Аванс любой суммы; в день зарплаты руководитель вычитает его сейчас или оставляет на потом."""
     w = world
-    await w.tariff(w.delivery, "100", d(1), dept=w.north)
-    with pytest.raises(InsufficientFunds, match="не разрешён"):
-        await payroll.register_payout(
+    await w.tariff(w.delivery, "50", d(1), dept=w.north)
+    await op(w, settings, w.petr, w.delivery, "4", d(17))  # заработал 200
+
+    async def pay(kind, amount):
+        p, _ = await payroll.register_payout(
             session,
-            w.accountant,
+            w.owner,
             settings,
             employee=w.petr,
-            amount=D(500),
+            amount=D(amount),
             currency="USD",
-            kind="advance",
+            kind=kind,
             idempotency_key=key(),
         )
-    await payroll.set_credit_limit(session, w.manager, settings, w.petr, D(1000), "USD")
-    with pytest.raises(InsufficientFunds, match="только аванс"):
-        await payroll.register_payout(
-            session,
-            w.accountant,
-            settings,
-            employee=w.petr,
-            amount=D(500),
-            currency="USD",
-            kind="salary",
-            idempotency_key=key(),
+        await payroll.confirm_payout(session, w.owner, settings, p.id)
+
+    async def salary(deduct):
+        p, deducted = await payroll.pay_salary(
+            session, w.owner, settings, employee=w.petr, deduct_advance=deduct, idempotency_key=key(), currency="USD"
         )
-    adv, _ = await payroll.register_payout(
-        session,
-        w.accountant,
-        settings,
-        employee=w.petr,
-        amount=D(600),
-        currency="USD",
-        kind="advance",
-        idempotency_key=key(),
+        if p is not None:
+            await payroll.confirm_payout(session, w.owner, settings, p.id)
+        return (p.amount if p else None), deducted
+
+    async def preview():
+        pv = await payroll.salary_preview(session, w.petr.id, "USD")
+        return pv.earned, pv.advance, pv.with_deduction
+
+    await pay("advance", "300")  # срочно нужны деньги: больше, чем заработал
+    with pytest.raises(InsufficientFunds, match="авансом"):
+        await pay("salary", "1")  # зарплатой больше заработанного нельзя
+    await op(w, settings, w.petr, w.delivery, "1", d(18))  # всего заработал 250
+    assert await preview() == (D(250), D(300), D(0))
+
+    # 15-е число: руководитель решил аванс пока не вычитать
+    assert await salary(False) == (D(250), 0)
+    assert await preview() == (D(0), D(300), D(0))
+
+    # 30-е: заработал ещё 250, вычитаем аванс; к выплате ничего, 50 аванса остаётся на следующий раз
+    await op(w, settings, w.petr, w.delivery, "5", d(20))
+    assert await salary(True) == (None, D(250))
+    assert await preview() == (D(0), D(50), D(0))
+
+    # Следующая зарплата: заработал 100, вычитается остаток аванса 50
+    await op(w, settings, w.petr, w.delivery, "2", d(21))
+    assert await preview() == (D(100), D(50), D(50))
+    assert await salary(True) == (D(50), D(50))
+    assert await preview() == (D(0), D(0), D(0))
+    assert (await ledger.balances(session, w.petr.id))["USD"] == D(0)
+    with pytest.raises(ValidationError, match="нечего"):
+        await salary(True)
+
+    # Сотрудник может попросить аванс больше заработанного: решает руководитель
+    req, _ = await payroll.request_payout(
+        session, w.ivan_actor, settings, amount=D(1000), currency="USD", comment=None, idempotency_key=key()
     )
-    await payroll.confirm_payout(session, w.owner, settings, adv.id)
-    assert (await ledger.balances(session, w.petr.id))["USD"] == D(-600)
-    with pytest.raises(InsufficientFunds, match="долг"):
-        await payroll.register_payout(
-            session,
-            w.accountant,
-            settings,
-            employee=w.petr,
-            amount=D(500),
-            currency="USD",
-            kind="advance",
-            idempotency_key=key(),
-        )
-    # долг гасится из начислений автоматически
-    await op(w, settings, w.petr, w.delivery, "8", d(20))
-    assert (await ledger.balances(session, w.petr.id))["USD"] == D(200)
-    # лимит по умолчанию из настроек
-    generous = dataclasses.replace(settings, default_credit_limit=D(50))
-    assert await payroll.credit_limit(session, generous, w.ivan.id, "USD") == D(50)
+    _, payout = await payroll.decide_request(session, w.owner, settings, req.id, True)
+    assert payout.kind == "advance" and payout.amount == D(1000)
 
 
 # ------------------------------------------------------------------ партии и себестоимость

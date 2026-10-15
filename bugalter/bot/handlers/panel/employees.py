@@ -1,4 +1,4 @@
-"""Сотрудники: список, карточка, добавление по должности, ссылка-приглашение, своя цена, аванс в долг.
+"""Сотрудники: список, карточка, добавление по должности, ссылка-приглашение, своя цена.
 
 Сотрудника видно по должности. Ник и Telegram ID показываются только владельцу.
 """
@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from ....db.models import Department, Employee, Tariff, User, WorkType
 from ....domain.errors import DomainError, NotFound
-from ....domain.money import currency_label, fmt_money, parse_decimal
+from ....domain.money import fmt_money
 from ....domain.permissions import Perm
 from ....services import access, org, payroll, tariffs
 from ... import ui
@@ -85,8 +85,11 @@ async def employee_view(session, settings, emp_id: int, actor):
             lines.append("🔑 Работник: видит свою работу и зарплату")
     else:
         lines.append("⏳ Ещё не подключился, отправьте ему ссылку (кнопка ниже)")
-    credit = await payroll.credit_limit(session, settings, emp.id, settings.currency)
-    lines.append(f"💳 Аванс в долг: {'до ' + fmt_money(credit, settings.currency) if credit else 'нельзя'}")
+    preview = await payroll.salary_preview(session, emp.id, settings.currency)
+    if preview.earned or preview.advance:
+        lines.append(f"💰 Заработано, не выплачено: {fmt_money(preview.earned, settings.currency)}")
+    if preview.advance:
+        lines.append(f"💵 Аванс, не вычтен: {fmt_money(preview.advance, settings.currency)}")
     personal = await org.chats_of_employee(session, emp.id)
     if personal:
         lines.append("💬 Его группа: " + ", ".join(h(c.title or str(c.chat_id)) for c in personal))
@@ -113,7 +116,7 @@ async def employee_view(session, settings, emp_id: int, actor):
         rows.append([("🔗 Ссылка", f"p:e:inv:{emp.id}"), ("✏️ Должность", f"p:e:pos:{emp.id}")])
     else:
         rows.append([("🔑 Роль", f"p:e:role:{emp.id}"), ("✏️ Должность", f"p:e:pos:{emp.id}")])
-    rows.append([("💰 Своя цена", f"p:e:rate:{emp.id}"), ("💳 Аванс в долг", f"p:e:cr:{emp.id}")])
+    rows.append([("💸 Выплаты", f"p:pay:v:{emp.id}"), ("💰 Своя цена", f"p:e:rate:{emp.id}")])
     if len(await org.active_departments(session)) > 1:
         rows.append([("🏢 + Филиал", f"p:e:ad:{emp.id}"), ("🏢 − Филиал", f"p:e:rd:{emp.id}")])
     rows.append([("🚫 Уволить", f"p:e:off:{emp.id}") if emp.is_active else ("♻️ Вернуть", f"p:e:on:{emp.id}")])
@@ -245,33 +248,6 @@ async def employee_active(callback: CallbackQuery, session, actor, settings, not
     await org.set_employee_active(session, actor, emp, parts[2] == "on")
     await session.flush()
     show(callback, notifier, *await employee_view(session, settings, emp.id, actor))
-
-
-@router.callback_query(F.data.startswith("p:e:cr:"))
-async def employee_credit(callback: CallbackQuery, state: FSMContext, session, settings, notifier):
-    emp = await session.get(Employee, int(callback.data.split(":")[3]))
-    await ask(state, "emp_credit", emp_id=emp.id)
-    cur = currency_label(settings.currency)
-    show(
-        callback,
-        notifier,
-        f"💳 <b>Аванс в долг: {h(emp.full_name)}</b>\n\n"
-        "Сколько можно выдать сотруднику сверх того, что он уже заработал. "
-        f"Например, лимит {cur}20 000, заработал {cur}5 000: выдать можно до {cur}25 000. "
-        "То, что выдано сверх заработанного, становится его долгом и само спишется из следующих начислений.\n\n"
-        f"Напишите сумму в {cur}, например <b>20000</b>. 0 значит сверх заработанного не давать.",
-        cancel_kb(f"p:e:v:{emp.id}"),
-    )
-
-
-@form("emp_credit")
-async def form_emp_credit(message, state, session, actor, settings, notifier, data, **_):
-    emp = await session.get(Employee, data["emp_id"])
-    amount = parse_decimal(message.text, allow_zero=True, max_scale=2, what="сумму")
-    await payroll.set_credit_limit(session, actor, settings, emp, amount, settings.currency)
-    await state.clear()
-    await session.flush()
-    notifier.answer(message, *await employee_view(session, settings, emp.id, actor))
 
 
 @router.callback_query(F.data.startswith("p:e:pos:"))

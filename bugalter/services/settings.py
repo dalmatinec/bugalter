@@ -40,9 +40,6 @@ SPECS: dict[str, SettingSpec] = {
     "payout_requires_confirmation": SettingSpec(
         "true", "bool", "Выплата попадает в расчёт только после отдельного подтверждения"
     ),
-    "default_credit_limit": SettingSpec(
-        "0", "decimal", "Аванс в долг по умолчанию: сколько можно выдать сверх заработанного (0 значит нельзя)"
-    ),
     "deduction_requires_consent": SettingSpec(
         "false", "bool", "Штраф/удержание проводится только после согласия сотрудника в боте"
     ),
@@ -68,7 +65,6 @@ class Settings:
     payout_confirm_owner_only: bool
     allow_self_confirm: bool
     payout_requires_confirmation: bool
-    default_credit_limit: Decimal
     deduction_requires_consent: bool
     deduction_limit_percent: Decimal | None
     # Только для тестов: зафиксированная дата «сегодня».
