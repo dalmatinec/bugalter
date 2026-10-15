@@ -22,7 +22,7 @@ from .settings import Settings
 CALC_METHODS = {
     "per_unit": "количество × ставка (можно со ступенчатой шкалой)",
     "fixed": "фиксированная сумма за операцию",
-    "percent": "процент от суммы: количество — база (например, сумма заказа), ставка — %",
+    "percent": "процент от суммы, где количество - это база, например сумма заказа, а ставка - процент",
 }
 
 
@@ -32,7 +32,7 @@ async def create_work_type(
     actor.require(Perm.WORKTYPE_MANAGE)
     code = code.strip().lower()
     if not code or len(code) > 32 or " " in code:
-        raise ValidationError("Код вида работ — одно слово до 32 символов")
+        raise ValidationError("Код вида работ - одно слово до 32 символов")
     if calc_method not in CALC_METHODS:
         raise ValidationError("Метод расчёта: " + ", ".join(f"{k} ({v})" for k, v in CALC_METHODS.items()))
     await reference.get_unit(session, unit_code)
@@ -59,7 +59,7 @@ async def get_work_type(session: AsyncSession, code: str, required: bool = True)
 
     wt = await lookup(session, WorkType, WorkType.code, WorkType.name, code)
     if wt is None and required:
-        raise NotFound(f"Нет вида работ «{code}». Список: /wt")
+        raise NotFound(f"Нет такого вида работ: {code}")
     return wt
 
 
@@ -267,6 +267,23 @@ async def tiers_of(session: AsyncSession, tariff_id: int) -> list[tuple[Decimal,
     return [(t, r) for t, r in rows]
 
 
+async def tiers_of_many(session: AsyncSession, tariff_ids: list[int]) -> dict[int, list[tuple[Decimal, Decimal]]]:
+    """Ступени сразу для нескольких тарифов одним запросом (вместо запроса на каждый тариф)."""
+    if not tariff_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(TariffTier.tariff_id, TariffTier.threshold, TariffTier.rate)
+            .where(TariffTier.tariff_id.in_(tariff_ids))
+            .order_by(TariffTier.tariff_id, TariffTier.threshold)
+        )
+    ).all()
+    result: dict[int, list[tuple[Decimal, Decimal]]] = {tid: [] for tid in tariff_ids}
+    for tariff_id, threshold, rate in rows:
+        result[tariff_id].append((threshold, rate))
+    return result
+
+
 def split_by_tiers(
     prior: Decimal, quantity: Decimal, base_rate: Decimal, tiers: list[tuple[Decimal, Decimal]]
 ) -> list[tuple[Decimal, Decimal]]:
@@ -293,9 +310,9 @@ async def create_coefficient(session: AsyncSession, actor, code: str, factor: De
     actor.require(Perm.TARIFF_MANAGE)
     code = code.strip().lower().lstrip("*")
     if not code or " " in code or len(code) > 20:
-        raise ValidationError("Код коэффициента — одно слово до 20 символов")
+        raise ValidationError("Код коэффициента - одно слово до 20 символов")
     if factor <= 0 or scale_of(factor) > 4:
-        raise ValidationError("Коэффициент — положительное число, не больше 4 знаков после запятой")
+        raise ValidationError("Коэффициент должен быть положительным числом, не больше 4 знаков после запятой")
     if await session.get(Coefficient, code) is not None:
         raise ValidationError(f"Коэффициент {code} уже есть. Значение не меняется, чтобы не исказить историю")
     coef = Coefficient(code=code, name=name.strip() or code, factor=factor, created_by=actor.user.id)
@@ -308,7 +325,7 @@ async def set_coefficient_active(session: AsyncSession, actor, code: str, active
     actor.require(Perm.TARIFF_MANAGE)
     coef = await session.get(Coefficient, code.strip().lower().lstrip("*"))
     if coef is None:
-        raise NotFound(f"Нет коэффициента {code}. Список: /coefs")
+        raise NotFound(f"Нет коэффициента {code}")
     coef.is_active = active
     await audit(session, actor.user.id, "tariff.coefficient_active", "coefficient", coef.code, {"active": active})
     return coef
@@ -328,7 +345,7 @@ async def resolve_coefficients(session: AsyncSession, codes: list[str] | None) -
             continue
         coef = await session.get(Coefficient, code)
         if coef is None or not coef.is_active:
-            raise ValidationError(f"Нет действующего коэффициента «{code}». Список: /coefs")
+            raise ValidationError(f"Нет действующего коэффициента {code}")
         factor *= coef.factor
         used.append(code)
     return factor, used
@@ -342,15 +359,16 @@ async def current_rates(
     Возвращает (тариф, подразделение, сотрудник, ступени, будущая_ли).
     """
     rows = await tariff_history(session, work_type_id)
+    tiers_by_tariff = await tiers_of_many(session, [t.id for t, _, _ in rows])
     seen: set[tuple] = set()
     result = []
     for tariff, dept_name, emp_name in rows:
         scope = (tariff.department_id, tariff.employee_id)
         if tariff.valid_from > today:
-            result.append((tariff, dept_name, emp_name, await tiers_of(session, tariff.id), True))
+            result.append((tariff, dept_name, emp_name, tiers_by_tariff[tariff.id], True))
             continue
         if scope in seen:
             continue
         seen.add(scope)
-        result.append((tariff, dept_name, emp_name, await tiers_of(session, tariff.id), False))
+        result.append((tariff, dept_name, emp_name, tiers_by_tariff[tariff.id], False))
     return result

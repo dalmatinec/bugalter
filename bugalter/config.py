@@ -27,7 +27,7 @@ class Config(BaseSettings):
         text = str(value or "").replace(";", ",")
         for part in text.split(","):
             if part.strip() and not part.strip().lstrip("-").isdigit():
-                raise ValueError(f"OWNER_TELEGRAM_IDS: «{part.strip()}» — не числовой Telegram ID")
+                raise ValueError(f"OWNER_TELEGRAM_IDS: {part.strip()} не числовой Telegram ID")
         return text
 
     @property

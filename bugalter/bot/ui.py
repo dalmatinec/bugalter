@@ -59,10 +59,10 @@ async def money(session: AsyncSession, amount, code: str, signed: bool = False) 
 
 async def user_name(session: AsyncSession, user_id: int | None) -> str:
     if not user_id:
-        return "—"
+        return "-"
     user = await session.get(User, user_id)
     if user is None:
-        return "—"
+        return "-"
     return user.full_name or (f"@{user.username}" if user.username else str(user.telegram_id))
 
 
@@ -94,12 +94,12 @@ async def entry_card(session: AsyncSession, entry: WorkEntry, show_amount: bool)
     if entry.decision_comment:
         lines.append(f"📝 {h(entry.decision_comment)}")
     if entry.status == "cancelled":
-        lines.append(f"🚫 отменил: {h(await user_name(session, entry.cancelled_by))} — {h(entry.cancel_reason or '')}")
+        lines.append(f"🚫 отменил: {h(await user_name(session, entry.cancelled_by))}, {h(entry.cancel_reason or '')}")
     return "\n".join(lines)
 
 
 def calc_text(method: str, entry: WorkEntry) -> str:
-    """Как получена сумма: «45 × 400 + 5 × 450», «3,5 % от 12 345,67», «фикс. 700», плюс коэффициент."""
+    """Как получена сумма: "45 × 400 + 5 × 450", "3,5 % от 12 345,67", "фикс. 700", плюс коэффициент."""
     details = entry.calc_details or {}
     pieces = details.get("pieces") or [{"qty": str(entry.quantity), "rate": str(entry.rate)}]
     if method == "fixed":
@@ -139,7 +139,7 @@ async def stock_doc_card(session: AsyncSession, doc: StockDocument) -> str:
     dept = await session.get(Department, doc.department_id)
     status = {
         "posted": "проведён",
-        "in_transit": "🚚 в пути — ждёт подтверждения получения",
+        "in_transit": "🚚 в пути, ждёт подтверждения получения",
         "completed": "✅ получено",
         "returned": "↩️ не принято, возвращено",
     }[doc.status]
@@ -300,7 +300,7 @@ def statement_text(st: payroll.Statement, with_available: bool = False) -> str:
             for ol in cs.other_lines:
                 lines.append(
                     f"• {ol.business_date:%d.%m} {payroll.LEDGER_TITLES[ol.entry_type]} "
-                    f"{m(ol.amount, signed=True)} — {h(ol.comment)}"
+                    f"{m(ol.amount, signed=True)}, {h(ol.comment)}"
                 )
         lines.append("")
         lines.append(f"Начислено: {m(cs.accrued)}")

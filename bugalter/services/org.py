@@ -19,7 +19,7 @@ _CODE_RE = re.compile(r"^[\w\-]{1,32}$", re.UNICODE)
 def _check_code(code: str, what: str) -> str:
     code = code.strip().lower()
     if not _CODE_RE.match(code):
-        raise ValidationError(f"Код {what} — одно слово до 32 символов (буквы, цифры, -, _): «{code}»")
+        raise ValidationError(f"Код {what} - одно слово до 32 символов (буквы, цифры, -, _): {code}")
     return code
 
 
@@ -57,12 +57,34 @@ async def lookup(session: AsyncSession, model, code_col, name_col, text: str):
 async def get_department(session: AsyncSession, code: str, required: bool = True) -> Department | None:
     dept = await lookup(session, Department, Department.code, Department.name, code)
     if dept is None and required:
-        raise NotFound(f"Нет подразделения «{code}». Список: /depts")
+        raise NotFound(f"Нет такого филиала: {code}")
     return dept
 
 
 async def list_departments(session: AsyncSession) -> list[Department]:
     return list((await session.execute(select(Department).order_by(Department.code))).scalars())
+
+
+async def department_counts(session: AsyncSession) -> dict[int, tuple[int, int]]:
+    """Сотрудников и групп по каждому подразделению за один запрос (вместо запроса на каждую строку)."""
+    members = (
+        await session.execute(
+            select(EmployeeDepartment.department_id, func.count())
+            .where(EmployeeDepartment.is_active)
+            .group_by(EmployeeDepartment.department_id)
+        )
+    ).all()
+    chats = (
+        await session.execute(
+            select(TelegramChat.department_id, func.count())
+            .where(TelegramChat.is_active)
+            .group_by(TelegramChat.department_id)
+        )
+    ).all()
+    members_by_dept = dict(members)
+    chats_by_dept = dict(chats)
+    dept_ids = set(members_by_dept) | set(chats_by_dept)
+    return {d: (members_by_dept.get(d, 0), chats_by_dept.get(d, 0)) for d in dept_ids}
 
 
 async def create_employee(
@@ -89,7 +111,7 @@ async def create_employee(
 async def get_employee(session: AsyncSession, code: str, required: bool = True) -> Employee | None:
     employee = await lookup(session, Employee, Employee.code, Employee.full_name, code)
     if employee is None and required:
-        raise NotFound(f"Не нашёл сотрудника «{code}». Список: /emps")
+        raise NotFound(f"Не нашёл сотрудника: {code}")
     return employee
 
 
@@ -274,6 +296,30 @@ async def list_chats(session: AsyncSession) -> list[tuple[TelegramChat, Departme
         )
     ).all()
     return [tuple(r) for r in rows]
+
+
+async def chats_of_department(session: AsyncSession, department_id: int) -> list[TelegramChat]:
+    """Группы этого подразделения (используется индекс по department_id, без сканирования всей таблицы)."""
+    return list(
+        (
+            await session.execute(
+                select(TelegramChat)
+                .where(TelegramChat.department_id == department_id, TelegramChat.is_active)
+                .order_by(TelegramChat.title)
+            )
+        ).scalars()
+    )
+
+
+async def chats_of_employee(session: AsyncSession, employee_id: int) -> list[TelegramChat]:
+    """Личные группы сотрудника (используется индекс по employee_id, без сканирования всей таблицы)."""
+    return list(
+        (
+            await session.execute(
+                select(TelegramChat).where(TelegramChat.employee_id == employee_id, TelegramChat.is_active)
+            )
+        ).scalars()
+    )
 
 
 async def department_chats(session: AsyncSession, department_id: int) -> list[int]:

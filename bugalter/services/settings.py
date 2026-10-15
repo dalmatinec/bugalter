@@ -1,4 +1,4 @@
-"""Системные настройки, которые меняются из бота командой /set без перезапуска."""
+"""Системные настройки бота: меняются кнопками в Управлении, Настройки."""
 
 import datetime as dt
 from dataclasses import dataclass
@@ -26,7 +26,7 @@ SPECS: dict[str, SettingSpec] = {
     "currency": SettingSpec("USD", "currency", "Валюта по умолчанию для новых тарифов и выплат"),
     "rounding_mode": SettingSpec("HALF_UP", "rounding", "Режим округления сумм (HALF_UP, HALF_EVEN, DOWN, UP)"),
     "timezone": SettingSpec("UTC", "timezone", "Часовой пояс компании: граница дня и периода"),
-    "payroll_split_day": SettingSpec("15", "int", "Последний день первой половины месяца (периоды 1–N и N+1–конец)"),
+    "payroll_split_day": SettingSpec("15", "int", "Последний день первой половины месяца (периоды 1-N и N+1-конец)"),
     "group_show_amounts": SettingSpec("false", "bool", "Показывать суммы начислений в рабочих группах"),
     "allow_self_confirm": SettingSpec(
         "true", "bool", "Автор операции/документа может сам его подтвердить (кроме записей в свою пользу)"
@@ -35,7 +35,7 @@ SPECS: dict[str, SettingSpec] = {
         "true", "bool", "Выплата попадает в расчёт только после отдельного подтверждения"
     ),
     "default_credit_limit": SettingSpec(
-        "0", "decimal", "Аванс в долг по умолчанию: сколько можно выдать сверх заработанного (0 — нельзя)"
+        "0", "decimal", "Аванс в долг по умолчанию: сколько можно выдать сверх заработанного (0 значит нельзя)"
     ),
     "deduction_requires_consent": SettingSpec(
         "false", "bool", "Штраф/удержание проводится только после согласия сотрудника в боте"
@@ -43,7 +43,7 @@ SPECS: dict[str, SettingSpec] = {
     "deduction_limit_percent": SettingSpec(
         "-",
         "percent",
-        "Лимит удержаний за период, % от начислений периода; остаток удерживается в следующих (- — без лимита)",
+        "Лимит удержаний за период, % от начислений периода; остаток удерживается в следующих (- значит без лимита)",
     ),
 }
 
@@ -137,7 +137,7 @@ async def set_setting(session: AsyncSession, actor, key: str, raw: str) -> str:
         raise ValidationError(f"Нет такой настройки: {key}")
     value = _parse(key, raw)
     if SPECS[key].kind == "currency" and await session.get(Currency, value) is None:
-        raise ValidationError(f"Валюта {value} не заведена. Добавьте: /currency_add {value} 2 Название")
+        raise ValidationError(f"Валюта {value} не поддерживается. Доступны: USD, EUR, RUB, KZT, UZS, KGS")
     if value is None:
         stored = "-"
     elif isinstance(value, bool):

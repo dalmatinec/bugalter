@@ -27,7 +27,7 @@ log = structlog.get_logger(__name__)
 def _db_error_text(exc: DBAPIError) -> str | None:
     text = str(exc.orig) if exc.orig is not None else str(exc)
     if "Расчётный период" in text and "закрыт" in text:
-        return "Расчётный период закрылся во время операции. Повторите действие — запись попадёт в открытый период."
+        return "Расчётный период закрылся во время операции. Повторите действие, запись попадёт в открытый период."
     if "ck_stock_balances_non_negative" in text:
         return "Недостаточно товара: остаток не может стать отрицательным."
     if "только добавлением" in text or "нельзя" in text:
@@ -89,7 +89,7 @@ class ContextMiddleware(BaseMiddleware):
             else:
                 log.info("db_rule_violation", error=str(exc.orig))
                 await self._reply(event, f"⚠️ {message}", notifier)
-        except Exception as exc:  # noqa: BLE001 — сообщаем пользователю и владельцам, затем логируем
+        except Exception as exc:  # noqa: BLE001: сообщаем пользователю и владельцам, затем логируем
             notifier.discard()
             await self._internal_error(event, exc, notifier, data)
         finally:

@@ -293,7 +293,7 @@ async def periods(message: Message, session, settings, notifier, is_private):
     lines = ["<b>Расчётные периоды</b>"]
     for p in rows:
         status = "🔒 закрыт" if p.status == "closed" else "🟢 открыт"
-        lines.append(f"• п{p.id}: {p.title} — {status}" + (f", версия {p.version}" if p.version else ""))
+        lines.append(f"• п{p.id}: {p.title}, {status}" + (f", версия {p.version}" if p.version else ""))
     lines.append(
         "\nЗакрыть: /period_close &lt;№&gt; · итоги: /period &lt;№&gt; · расчёт: /balance &lt;код&gt; п&lt;№&gt;"
     )
@@ -347,7 +347,7 @@ async def period_reopen(message: Message, command: CommandObject, session, actor
     period = await payroll.reopen_period(session, actor, parse_id(items[0]), " ".join(items[1:]))
     notifier.answer(
         message,
-        f"🔓 Период {period.title} переоткрыт. Причина записана в журнал. После исправлений закройте его снова — "
+        f"🔓 Период {period.title} переоткрыт. Причина записана в журнал. После исправлений закройте его снова, "
         "будет сохранена новая версия итогов, старая останется.",
     )
 

@@ -22,7 +22,7 @@ def _key(message: Message) -> str:
 
 
 async def _qty_unit(session, items: list[str]) -> tuple:
-    """«3 уп …» → (3, 'уп', остаток)."""
+    """ "3 уп …" → (3, 'уп', остаток)."""
     need(items, 1, "… <количество> [единица]")
     qty = parse_decimal(items[0], what="количество")
     rest = items[1:]
@@ -43,7 +43,7 @@ async def _send_card(message, session, notifier, sessionmaker, result, is_privat
 
 
 async def _ask_recipient(session, notifier, doc: StockDocument, card: str):
-    """Получателю — карточка с кнопками «Получено/Не получено» в личку."""
+    """Получателю: карточка с кнопками Получено/Не получено в личку."""
     if doc.target_employee_id:
         emp = await session.get(Employee, doc.target_employee_id)
         if emp.user_id:
@@ -215,7 +215,7 @@ async def writeoff(
     message: Message, command: CommandObject, session, actor, chat_dept, notifier, is_private, sessionmaker
 ):
     ex = extract(tokens(command.args), ("emp",))
-    need(ex.rest, 3, "/writeoff <артикул> <кол-во> [единица] <причина> [emp=код — списать с сотрудника]")
+    need(ex.rest, 3, "/writeoff <артикул> <кол-во> [единица] <причина> [emp=код, списать с сотрудника]")
     dept = await resolve_department(session, actor, chat_dept, ex.dept, Perm.STOCK_OPERATE)
     product = await stock.get_product(session, ex.rest[0])
     qty, unit, rest = await _qty_unit(session, ex.rest[1:])
@@ -263,7 +263,7 @@ async def inventory(message: Message, command: CommandObject, session, actor, ch
     if res.case:
         kind = "Недостача" if res.case.kind == "shortage" else "Излишек"
         text += (
-            f"\n⚠️ {kind} {fmt_qty(res.case.qty, product.base_unit)} — расхождение <b>{res.case.number}</b> "
+            f"\n⚠️ {kind} {fmt_qty(res.case.qty, product.base_unit)}, расхождение <b>{res.case.number}</b> "
             "ждёт решения. Денежных последствий пока нет.\n"
             f"Решение: /case {res.case.id} company  или  "
             f"/case {res.case.id} employee &lt;цена&gt; [USD] &lt;основание&gt;"
@@ -352,7 +352,7 @@ async def stock_balances(
     emp = await org.get_employee(session, ex.rest[0]) if ex.rest else None
     rows = await stock.balances(session, department_id=dept.id, employee_id=emp.id if emp else None)
     lines = [f"📦 <b>Остатки {h(dept.code)}</b>" + (f" · {h(emp.full_name)}" if emp else "")]
-    # Себестоимость — денежные данные: в группе показываем только при group_show_amounts.
+    # Себестоимость: денежные данные, в группе показываем только при group_show_amounts.
     show_value = is_private or settings.group_show_amounts
     current = None
     for row in rows:
@@ -380,14 +380,14 @@ async def batches(message: Message, command: CommandObject, session, actor, noti
     need(items, 1, "/batches <артикул>")
     product = await stock.get_product(session, items[0])
     rows = await stock.product_batches(session, product)
-    lines = [f"📦 <b>Партии: {h(product.name)}</b> (новые сверху, списание по FIFO — со старых)"]
+    lines = [f"📦 <b>Партии: {h(product.name)}</b> (новые сверху, списание по FIFO со старых)"]
     for batch, remaining in rows:
         cost = (
             f"{fmt_price(batch.unit_cost, batch.currency)}/{product.base_unit}"
             if batch.unit_cost is not None
             else "без цены"
         )
-        received = fmt_qty(batch.qty_received, product.base_unit) if batch.qty_received is not None else "—"
+        received = fmt_qty(batch.qty_received, product.base_unit) if batch.qty_received is not None else "-"
         lines.append(
             f"• {batch.number} от {batch.received_on:%d.%m.%Y}: пришло {received}, "
             f"осталось {fmt_qty(remaining, product.base_unit)} · {cost}"
@@ -420,7 +420,7 @@ async def stock_doc_action(callback: CallbackQuery, session, actor, notifier):
     notifier.edit(callback.message, card, ui.stock_doc_kb(doc))
     if not changed:
         return
-    # Обновляем карточку в группе (если нажали в личке) и сообщаем операторам — по требованию заказчика.
+    # Обновляем карточку в группе (если нажали в личке) и сообщаем операторам.
     if doc.chat_id and doc.message_id and doc.chat_id != callback.message.chat.id:
         notifier.edit_in_chat(doc.chat_id, doc.message_id, card)
     dept_id = doc.target_department_id or doc.department_id
@@ -440,26 +440,8 @@ async def products(message: Message, session, notifier):
     lines = []
     for p, units in rows:
         alt = ", ".join(f"1 {u.unit_code} = {fmt_number(u.factor)} {p.base_unit}" for u in units)
-        lines.append(f"• <code>{h(p.sku)}</code> {h(p.name)} · {h(p.base_unit)}" + (f" · {alt}" if alt else ""))
-    notifier.answer(message, "\n".join(lines) or "Товаров нет. /product_add <артикул> <единица> <название>")
-
-
-@router.message(Command("product_add"))
-async def product_add(message: Message, command: CommandObject, session, actor, notifier):
-    items = tokens(command.args)
-    need(items, 3, "/product_add <артикул> <единица> <название>")
-    p = await stock.create_product(session, actor, items[0], items[1], " ".join(items[2:]))
-    notifier.answer(message, f"✅ Товар {h(p.name)} ({h(p.sku)}), базовая единица {h(p.base_unit)}")
-
-
-@router.message(Command("product_unit"))
-async def product_unit(message: Message, command: CommandObject, session, actor, notifier):
-    items = tokens(command.args)
-    need(items, 3, "/product_unit <артикул> <единица> <сколько базовых единиц в ней>")
-    p = await stock.get_product(session, items[0])
-    factor = parse_decimal(items[2], what="коэффициент")
-    await stock.add_product_unit(session, actor, p, items[1], factor)
-    notifier.answer(message, f"✅ 1 {h(items[1])} = {fmt_number(factor)} {h(p.base_unit)} для «{h(p.name)}»")
+        lines.append(f"• {h(p.name)} ({h(p.base_unit)})" + (f", {alt}" if alt else ""))
+    notifier.answer(message, "\n".join(lines) or "Товаров нет. Добавить: Управление, Ещё, Товары.")
 
 
 @router.message(Command("my_stock"))
@@ -477,5 +459,5 @@ async def my_stock(message: Message, session, actor, notifier, is_private):
         lines.append("Ничего не числится.")
     pending = [d for d in await stock.pending_transfers(session, actor) if actor.is_self(d.target_employee_id or 0)]
     if pending:
-        lines.append(f"\n🚚 Ждут вашего подтверждения: {len(pending)} — /transit")
+        lines.append(f"\n🚚 Ждут вашего подтверждения: {len(pending)}, команда /transit")
     notifier.answer(message, "\n".join(lines))

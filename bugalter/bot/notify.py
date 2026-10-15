@@ -1,6 +1,6 @@
 """Отложенные ответы: пользователь узнаёт о результате только после фиксации транзакции.
 
-Если транзакция откатилась, сообщения «Подтверждено» не уйдут — вместо них придёт ошибка.
+Если транзакция откатилась, сообщения "Подтверждено" не уйдут, вместо них придёт ошибка.
 """
 
 from collections.abc import Awaitable, Callable
@@ -52,7 +52,7 @@ class Notifier:
             if sent is not None:
                 try:
                     await on_sent(sent)
-                except Exception as exc:  # noqa: BLE001 — сообщение уже ушло, это не повод падать
+                except Exception as exc:  # noqa: BLE001: сообщение уже ушло, это не повод падать
                     log.warning("on_sent_failed", error=str(exc))
             return sent
 

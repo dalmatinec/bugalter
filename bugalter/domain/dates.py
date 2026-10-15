@@ -45,7 +45,7 @@ def parse_date(raw: str, today: dt.date) -> dt.date:
         if "y" not in parts and value > today:
             value = value.replace(year=year - 1)
         return value
-    raise ValidationError(f"Не понимаю дату «{raw}». Формат: ДД.ММ, ДД.ММ.ГГГГ или ГГГГ-ММ-ДД")
+    raise ValidationError(f"Не понимаю дату {raw}. Формат: ДД.ММ, ДД.ММ.ГГГГ или ГГГГ-ММ-ДД")
 
 
 def looks_like_date(token: str) -> bool:

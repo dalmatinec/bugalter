@@ -96,7 +96,7 @@ def _m(value: Decimal, places: int) -> str:
 
 async def employee_report(session: AsyncSession, employee: Employee, statement: payroll.Statement) -> Table:
     table = Table(
-        title=f"Расчёт: {employee.full_name} — {statement.title}",
+        title=f"Расчёт: {employee.full_name} ({statement.title})",
         headers=["Раздел", "Описание", "Кол-во", "Ставка", "Сумма", "Валюта"],
     )
     for code, cs in statement.currencies.items():
@@ -134,7 +134,7 @@ async def department_summary(
 ) -> Table:
     """Подразделение: по каждому сотруднику — подтверждённая работа по видам, премии/удержания, выплаты."""
     table = Table(
-        title=f"Подразделение {department.name} ({department.code}): {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}",
+        title=f"Подразделение {department.name} ({department.code}): {date_from:%d.%m.%Y}-{date_to:%d.%m.%Y}",
         headers=["Сотрудник", "Статья", "Операций", "Кол-во", "Сумма", "Валюта"],
     )
     work = (
@@ -207,7 +207,7 @@ async def operations_report(
     headers = ["№", "Дата", "Сотрудник", "Работа", "Кол-во", "Ед.", "Заказ", "Статус"]
     if show_amounts:
         headers += ["Ставка", "Сумма", "Валюта"]
-    table = Table(title=f"Операции {department.code}: {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}", headers=headers)
+    table = Table(title=f"Операции {department.code}: {date_from:%d.%m.%Y}-{date_to:%d.%m.%Y}", headers=headers)
     rows = (
         await session.execute(
             select(WorkEntry, WorkType, Employee)
@@ -272,7 +272,7 @@ async def moves_report(
     session: AsyncSession, department: Department, date_from: dt.date, date_to: dt.date, tz: str
 ) -> Table:
     table = Table(
-        title=f"Движение товара {department.code}: {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}",
+        title=f"Движение товара {department.code}: {date_from:%d.%m.%Y}-{date_to:%d.%m.%Y}",
         headers=[
             "Время",
             "Документ",
@@ -316,7 +316,7 @@ async def payouts_report(
     session: AsyncSession, date_from: dt.date, date_to: dt.date, department_ids: set[int] | None
 ) -> Table:
     table = Table(
-        title=f"Выплаты {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}",
+        title=f"Выплаты {date_from:%d.%m.%Y}-{date_to:%d.%m.%Y}",
         headers=["№", "Дата", "Сотрудник", "Вид", "Сумма", "Валюта", "Статус", "Способ/комментарий"],
     )
     query = (
@@ -352,7 +352,7 @@ async def adjustments_report(
     session: AsyncSession, date_from: dt.date, date_to: dt.date, department_ids: set[int] | None
 ) -> Table:
     table = Table(
-        title=f"Премии, штрафы, удержания {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}",
+        title=f"Премии, штрафы, удержания {date_from:%d.%m.%Y}-{date_to:%d.%m.%Y}",
         headers=["№", "Дата", "Сотрудник", "Тип", "Сумма", "Валюта", "Статус", "Основание"],
     )
     query = (
@@ -413,7 +413,7 @@ def render_text(table: Table, max_rows: int = 60) -> str:
     for row in table.rows[:max_rows]:
         lines.append(" · ".join(_plain(v) for v in row if v not in (None, "")))
     if len(table.rows) > max_rows:
-        lines.append(f"… ещё {len(table.rows) - max_rows} строк — выгрузите отчёт в xlsx")
+        lines.append(f"... ещё {len(table.rows) - max_rows} строк, выгрузите отчёт в xlsx")
     if not table.rows:
         lines.append("Нет данных")
     lines.extend(table.notes)

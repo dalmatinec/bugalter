@@ -1,8 +1,8 @@
 """Складской учёт.
 
-Каждое движение — строка stock_moves «откуда → куда». Поставщик, клиенты, списание, недостача и излишек —
-условные места (могут уходить в минус), склад/сотрудник/«в пути» — реальные (остаток не меньше нуля).
-Выдача сотруднику и перемещения идут через «в пути» и завершаются подтверждением получения.
+Каждое движение - строка stock_moves "откуда -> куда". Поставщик, клиенты, списание, недостача и излишек:
+условные места (могут уходить в минус), склад/сотрудник/в пути: реальные (остаток не меньше нуля).
+Выдача сотруднику и перемещения идут через "в пути" и завершаются подтверждением получения.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ async def create_product(
     actor.require(Perm.STOCK_MANAGE)
     sku = sku.strip().lower()
     if not sku or " " in sku or len(sku) > 64:
-        raise ValidationError("Артикул — одно слово до 64 символов")
+        raise ValidationError("Артикул - одно слово до 64 символов")
     await reference.get_unit(session, unit_code)
     if (await session.execute(select(Product.id).where(Product.sku == sku))).first():
         raise ValidationError(f"Товар {sku} уже есть")
@@ -102,7 +102,7 @@ async def add_product_unit(session: AsyncSession, actor, product: Product, unit_
 async def get_product(session: AsyncSession, sku: str, required: bool = True) -> Product | None:
     product = await org.lookup(session, Product, Product.sku, Product.name, sku)
     if product is None and required:
-        raise NotFound(f"Нет товара «{sku}». Список: /products")
+        raise NotFound(f"Нет такого товара: {sku}")
     return product
 
 
@@ -128,18 +128,20 @@ async def to_base(session: AsyncSession, product: Product, qty: Decimal, unit_co
         pu = await session.get(ProductUnit, (product.id, unit_code))
         if pu is None:
             raise ValidationError(
-                f"Для «{product.name}» нет единицы «{unit_code}». Базовая — {product.base_unit}; "
-                f"добавить: /product_unit {product.sku} {unit_code} <коэффициент>"
+                f"Для {product.name} нет единицы {unit_code}, базовая - {product.base_unit}. "
+                "Добавить фасовку можно в карточке товара в Управлении."
             )
         factor = pu.factor
         entered_unit = await session.get(Unit, unit_code)
     if scale_of(qty) > entered_unit.scale:
-        raise ValidationError(f"Для «{entered_unit.code}» допускается {entered_unit.scale} знаков после запятой")
+        raise ValidationError(
+            f"Для {entered_unit.code} допускается не больше {entered_unit.scale} знаков после запятой"
+        )
     qty_base = qty * factor
     if scale_of(qty_base) > base.scale:
         raise ValidationError(
             f"{fmt_qty(qty, unit_code)} = {fmt_qty(qty_base, base.code)}: "
-            f"для «{base.code}» допускается {base.scale} знаков после запятой"
+            f"для {base.code} допускается не больше {base.scale} знаков после запятой"
         )
     return qty_base.normalize(), unit_code
 
@@ -267,7 +269,7 @@ async def _move(
         have = await balance(session, src.id, product.id)
         if have < qty:
             raise InsufficientStock(
-                f"Недостаточно «{product.name}» ({await describe_location(session, src)}): "
+                f"Недостаточно товара {product.name} ({await describe_location(session, src)}): "
                 f"есть {fmt_qty(have, product.base_unit)}, нужно {fmt_qty(qty, product.base_unit)}"
             )
         if allocations is None:
@@ -840,7 +842,7 @@ async def decide_case(
         if case.kind != "shortage":
             raise ValidationError("На сотрудника относится только недостача")
         if case.employee_id is None:
-            raise ValidationError("Недостача на складе не закреплена за сотрудником — решение только «company»")
+            raise ValidationError("Недостача на складе не закреплена за сотрудником, решение доступно только company")
         if actor.is_self(case.employee_id) and not actor.is_owner:
             raise AccessDenied("Нельзя решать расхождение по себе")
         product = await session.get(Product, case.product_id)
@@ -848,7 +850,7 @@ async def decide_case(
             total_cost, cost_currency = await case_cost(session, case)
             if total_cost is None:
                 raise ValidationError(
-                    "Себестоимость недостачи неизвестна (у части партий нет цены поступления) — укажите цену вручную"
+                    "Себестоимость недостачи неизвестна: у части партий нет цены поступления. " "Укажите цену вручную"
                 )
             currency_code = cost_currency
             cur = await reference.get_currency(session, currency_code)
@@ -857,7 +859,9 @@ async def decide_case(
             price_basis = (price_basis or "").strip() or "себестоимость по партиям (FIFO)"
         else:
             if price is None or price <= 0:
-                raise ValidationError("Укажите цену за базовую единицу товара или «cost» — по себестоимости")
+                raise ValidationError(
+                    "Укажите цену за базовую единицу товара, или слово cost для расчёта по себестоимости"
+                )
             if not price_basis or not price_basis.strip():
                 raise ValidationError("Укажите основание цены (закупочная, продажная, по договорённости…)")
             currency_code = (currency or settings.currency).upper()

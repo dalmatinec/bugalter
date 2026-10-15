@@ -358,7 +358,7 @@ class PayrollPeriod(Base):
 
     @property
     def title(self) -> str:
-        return f"{self.date_from:%d.%m.%Y}–{self.date_to:%d.%m.%Y}"
+        return f"{self.date_from:%d.%m.%Y}-{self.date_to:%d.%m.%Y}"
 
 
 class PeriodReopening(Base):

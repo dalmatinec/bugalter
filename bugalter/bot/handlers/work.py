@@ -38,7 +38,7 @@ def _show_amounts(settings, is_private: bool) -> bool:
 
 
 async def _notify_confirmers(session, notifier, entry: WorkEntry, actor, chat_id: int | None):
-    """Если операцию ввели в личке — сообщаем руководителям; в группе карточка с кнопками уже видна."""
+    """Если операцию ввели в личке, сообщаем руководителям; в группе карточка с кнопками уже видна."""
     if chat_id is not None:
         return
     text = await ui.entry_card(session, entry, show_amount=True)
@@ -88,7 +88,7 @@ async def op_command(
         return
     employees = await org.department_employees(session, dept.id)
     if not employees:
-        raise ValidationError(f"В подразделении «{dept.name}» нет сотрудников — добавьте их в /admin → Сотрудники")
+        raise ValidationError(f"В подразделении {dept.name} нет сотрудников, добавьте их в Управлении, Сотрудники")
     await state.set_state(OpWizard.employee)
     await state.update_data(dept_id=dept.id, key=f"wiz:{uuid.uuid4().hex}")
     kb = InlineKeyboardBuilder()
@@ -141,7 +141,7 @@ async def _ask_work_type(notifier, message, callback, state: FSMContext, session
     data = await state.get_data()
     wts = await tariffs.work_types_for_department(session, data["dept_id"])
     if not wts:
-        raise ValidationError("Нет доступных видов работ — добавьте их в /admin → Работы и ставки")
+        raise ValidationError("Нет доступных видов работ, добавьте их в Управлении, Работы и цены")
     await state.update_data(employee_id=emp.id)
     await state.set_state(OpWizard.work_type)
     kb = InlineKeyboardBuilder()
@@ -168,9 +168,9 @@ async def wiz_work_type(callback: CallbackQuery, state: FSMContext, session, not
     mention = f'<a href="tg://user?id={callback.from_user.id}">{h(callback.from_user.full_name)}</a>'
     notifier.send(
         callback.message.chat.id,
-        f"{mention}, ответьте на это сообщение: количество в «{h(wt.unit_code)}».\n"
+        f"{mention}, ответьте на это сообщение: количество в {h(wt.unit_code)}.\n"
         "Можно добавить номер заказа, дату, коэффициент и комментарий: <code>3 #A-1052 вчера *срочно текст</code>\n"
-        "/cancel — отмена",
+        "/cancel: отмена",
         ForceReply(selective=True, input_field_placeholder="3 #A-1052"),
     )
 
@@ -320,7 +320,7 @@ async def ops_summary(
         bucket[0] += 1
         bucket[1] += entry.quantity
         money[entry.currency] += entry.amount if entry.status == "confirmed" else 0
-    period = f"{date_from:%d.%m}" + (f"–{date_to:%d.%m}" if date_to != date_from else "")
+    period = f"{date_from:%d.%m}" + (f"-{date_to:%d.%m}" if date_to != date_from else "")
     lines = [f"📋 <b>Операции {h(dept.code)} за {period}</b>"]
     for name, items in sorted(summary.items()):
         lines.append(f"👤 {h(name)}")

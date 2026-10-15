@@ -124,7 +124,7 @@ async def test_rounding_per_operation(world, session, settings):
 
 async def test_no_tariff_no_operation(world, settings):
     w = world
-    with pytest.raises(ValidationError, match="Нет тарифа"):
+    with pytest.raises(ValidationError, match="Нет цены"):
         await create(w, settings, w.ivan, w.delivery, "1", d(10))
 
 

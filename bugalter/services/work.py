@@ -128,8 +128,8 @@ async def price_entry(
         tariff = await tariffs.resolve_tariff(session, wt.id, department_id, employee_id, performed_on)
     if tariff is None:
         raise ValidationError(
-            f"Нет тарифа «{wt.name}» на {performed_on:%d.%m.%Y} для этого сотрудника и подразделения. "
-            "Операцию нельзя провести без ставки — заведите тариф: /tariff"
+            f"Нет цены на {wt.name} на {performed_on:%d.%m.%Y} для этого сотрудника и подразделения. "
+            "Без цены операцию провести нельзя: задайте её в Управлении, Работы и цены"
         )
     currency = await session.get(Currency, tariff.currency)
     coefficient, codes = await tariffs.resolve_coefficients(session, coefficient_codes)
@@ -199,12 +199,12 @@ async def create_entry(
     if wt is None or not wt.is_active:
         raise NotFound("Вид работ не найден или отключён")
     if not await tariffs.work_type_allowed(session, wt, department_id):
-        raise ValidationError(f"«{wt.name}» недоступен в этом подразделении")
+        raise ValidationError(f"{wt.name} недоступен в этом подразделении")
     unit = await session.get(Unit, wt.unit_code)
     if quantity <= 0:
         raise ValidationError("Количество должно быть больше нуля")
     if scale_of(quantity) > unit.scale:
-        raise ValidationError(f"Для «{unit.code}» допускается не больше {unit.scale} знаков после запятой")
+        raise ValidationError(f"Для {unit.code} допускается не больше {unit.scale} знаков после запятой")
     today = settings.today()
     performed_on = performed_on or today
     if performed_on > today:
@@ -358,7 +358,7 @@ async def confirm_entry(
     if entry.status == "confirmed":
         return entry, None, False
     if entry.status != "pending":
-        raise Conflict(f"{entry.number}: подтвердить нельзя, статус — {STATUS_TITLES[entry.status]}")
+        raise Conflict(f"{entry.number}: подтвердить нельзя, статус {STATUS_TITLES[entry.status]}")
     _check_confirmer(actor, entry, settings)
     wt = await session.get(WorkType, entry.work_type_id)
     if (entry.calc_details or {}).get("tiered"):
@@ -412,7 +412,7 @@ async def reject_entry(
     if entry.status == "rejected":
         return entry
     if entry.status != "pending":
-        raise Conflict(f"{entry.number}: отклонить нельзя, статус — {STATUS_TITLES[entry.status]}")
+        raise Conflict(f"{entry.number}: отклонить нельзя, статус {STATUS_TITLES[entry.status]}")
     actor.require(Perm.WORK_CONFIRM, entry.department_id)
     entry.status = "rejected"
     entry.decided_by = actor.user.id

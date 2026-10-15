@@ -52,7 +52,7 @@ async def my_work(message: Message, session, actor, settings, notifier, is_priva
         date_from, date_to = period.date_from, period.date_to
     rows = await work.list_entries(session, employee_id=emp.id, date_from=date_from, date_to=date_to)
     rows = [r for r in rows if r[0].status != "draft"]
-    lines = [f"📊 <b>Моя работа {date_from:%d.%m}–{date_to:%d.%m.%Y}</b>"]
+    lines = [f"📊 <b>Моя работа {date_from:%d.%m}-{date_to:%d.%m.%Y}</b>"]
     totals: dict[tuple, list] = {}
     for entry, wt, _ in rows:
         if entry.status in ("rejected", "cancelled"):
@@ -64,8 +64,8 @@ async def my_work(message: Message, session, actor, settings, notifier, is_priva
         bucket[2] += entry.amount
     for (name, unit, cur, status), (count, qty, amount) in sorted(totals.items()):
         lines.append(
-            f"• {h(name)}: {fmt_qty(qty, unit)} ({count} оп.) = {await ui.money(session, amount, cur)} "
-            f"— {STATUS_TITLES[status]}"
+            f"• {h(name)}: {fmt_qty(qty, unit)} ({count} оп.) = {await ui.money(session, amount, cur)}, "
+            f"{STATUS_TITLES[status]}"
         )
     if not totals:
         lines.append("Операций нет.")
@@ -97,7 +97,7 @@ async def my_payouts(message: Message, session, actor, notifier, is_private):
     lines = ["🧾 <b>Мои выплаты</b>"]
     for p in rows:
         lines.append(
-            f"• {p.number} {p.business_date:%d.%m.%Y} {await ui.money(session, p.amount, p.currency)} — "
+            f"• {p.number} {p.business_date:%d.%m.%Y} {await ui.money(session, p.amount, p.currency)}, "
             f"{payroll.PAYOUT_KIND_TITLES[p.kind]}, {payroll.PAYOUT_STATUS_TITLES[p.status]}"
         )
     if len(lines) == 1:
@@ -150,13 +150,13 @@ async def request_payout_button(message: Message, state: FSMContext, session, ac
             line += f" (долг {await ui.money(session, -available, code)})"
         credit = await payroll.credit_limit(session, settings, emp.id, code)
         if credit:
-            line += f", аванс в долг — до {await ui.money(session, credit, code)} сверх этого"
+            line += f", аванс в долг до {await ui.money(session, credit, code)} сверх этого"
         lines.append(line)
     await state.set_state(RequestPayout.amount)
     await state.update_data(key=f"req:{uuid.uuid4().hex}")
     notifier.answer(
         message,
-        "Доступно к выплате: " + ", ".join(lines) + "\nНапишите сумму (и при желании комментарий). /cancel — отмена",
+        "Доступно к выплате: " + ", ".join(lines) + "\nНапишите сумму (и при желании комментарий). /cancel: отмена",
     )
 
 

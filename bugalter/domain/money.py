@@ -42,11 +42,11 @@ def parse_decimal(
     text = (raw or "").strip().replace(" ", "").replace(" ", "").replace("_", "")
     text = text.replace(",", ".")
     if not _NUMBER_RE.match(text):
-        raise ValidationError(f"Не понимаю {what}: «{raw}». Пример: 12 или 3,5")
+        raise ValidationError(f"Не понимаю {what}: {raw}. Пример: 12 или 3,5")
     try:
         value = Decimal(text)
     except InvalidOperation as exc:  # pragma: no cover - регулярка уже отсекла мусор
-        raise ValidationError(f"Не понимаю {what}: «{raw}»") from exc
+        raise ValidationError(f"Не понимаю {what}: {raw}") from exc
     integer_part = text.lstrip("+-").split(".")[0].lstrip("0")
     if len(integer_part) > MAX_DIGITS_BEFORE_POINT:
         raise ValidationError(f"Слишком большое значение: {raw}")

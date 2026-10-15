@@ -15,8 +15,9 @@ from sqlalchemy import func, select
 
 from bugalter.bot.app import ROUTERS, bootstrap, build_dispatcher
 from bugalter.config import Config
-from bugalter.db.models import Adjustment, Employee, Payout, StockDocument, WorkEntry, WorkType
-from bugalter.services import ledger, stock
+from bugalter.db.models import Adjustment, Department, Employee, Payout, StockDocument, Tariff, WorkEntry, WorkType
+from bugalter.services import access, ledger, org, payroll, stock, tariffs, work
+from bugalter.services.settings import get_settings
 
 OWNER, IVAN, OPERATOR = 1, 10, 30
 GROUP = -100777
@@ -121,31 +122,63 @@ async def h(sessionmaker, session):
     assert "Внутренняя ошибка" not in everything, everything
 
 
-async def setup_company(h: Harness):
-    for cmd in (
-        "/dept_add north Север",
-        "/emp_add ivan Иван Иванов",
-        "/emp_dept ivan north",
-        "/wt_add доставка заказ per_unit Доставка",
-        "/wt_add фасовка кг per_unit Фасовка",
-        "/tariff доставка 400 dept=north",
-        "/tariff фасовка 12.35 USD dept=north",
-        "/product_add coffee кг Кофе зерно",
-        "/product_unit coffee уп 0.25",
-    ):
-        out = texts(await h.say(OWNER, cmd))
-        assert "⚠️" not in out and "❌" not in out, (cmd, out)
+async def setup_company(h: Harness, session):
+    """Готовая компания для сквозных тестов.
+
+    Заводится напрямую через сервисный слой, а не текстовыми командами — так, как это теперь
+    реально происходит через кнопочную панель: сотрудник, работы, тарифы, товар, группа.
+    """
+    owner = await access.load_actor(session, OWNER, None, "Владелец")
+    dept = (await session.execute(select(Department))).scalar_one()  # создаётся сама при старте бота
+
+    emp = await org.create_employee(session, owner, "ivan", "Иван Иванов")
+    await org.attach_to_department(session, owner, emp, dept)
+
+    delivery = await tariffs.create_work_type(session, owner, "доставка", "заказ", "per_unit", "Доставка")
+    packing = await tariffs.create_work_type(session, owner, "фасовка", "кг", "per_unit", "Фасовка")
+    settings = await get_settings(session)
+    await work.add_tariffs(
+        session,
+        owner,
+        settings,
+        work_type=delivery,
+        rate=Decimal("400"),
+        currency="USD",
+        department=dept,
+        employees=None,
+        valid_from=None,
+    )
+    await work.add_tariffs(
+        session,
+        owner,
+        settings,
+        work_type=packing,
+        rate=Decimal("12.35"),
+        currency="USD",
+        department=dept,
+        employees=None,
+        valid_from=None,
+    )
+
+    coffee = await stock.create_product(session, owner, "coffee", "кг", "Кофе зерно")
+    await stock.add_product_unit(session, owner, coffee, "уп", Decimal("0.25"))
+    await session.commit()
+
     await h.say(IVAN, "/start")
-    assert "привязан" in texts(await h.say(OWNER, "/emp_link ivan 10"))
+    ivan_user = await access.find_user(session, str(IVAN))
+    await org.link_user(session, owner, emp, ivan_user)
+
     await h.say(OPERATOR, "/start")
-    out = texts(await h.say(OWNER, "/grant 30 operator north"))
-    assert "Выдача" in out, out
-    out = texts(await h.say(OWNER, "/bind north", GROUP))
-    assert "подключена" in out, out
+    operator_user = await access.find_user(session, str(OPERATOR))
+    await access.grant_role(session, owner, operator_user, "operator", dept)
+
+    await org.bind_chat(session, owner, GROUP, "Север", dept)
+    await session.commit()
+    return dept, emp
 
 
 async def test_full_operation_flow(h, session):
-    await setup_company(h)
+    await setup_company(h, session)
     # Быстрый ввод в группе оператором
     out = await h.say(OPERATOR, "/op ivan доставка 3 #A-1052 срочно", GROUP)
     card = texts(out)
@@ -192,7 +225,7 @@ async def test_full_operation_flow(h, session):
 
 
 async def test_wizard_flow(h, session):
-    await setup_company(h)
+    await setup_company(h, session)
     emp = (await session.execute(select(Employee).where(Employee.code == "ivan"))).scalar_one()
     wt = (await session.execute(select(WorkType).where(WorkType.code == "фасовка"))).scalar_one()
     out = await h.say(OPERATOR, "/op", GROUP)
@@ -218,7 +251,7 @@ async def test_wizard_flow(h, session):
 
 
 async def test_stock_flow_with_receipt_confirmation(h, session):
-    await setup_company(h)
+    await setup_company(h, session)
     assert "⚠️" not in texts(await h.say(OPERATOR, "/receive coffee 100", GROUP))
     out = await h.say(OPERATOR, "/issue ivan coffee 40 уп", GROUP)
     assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "Подтвердите получение" in c.text for c in out)
@@ -237,7 +270,7 @@ async def test_stock_flow_with_receipt_confirmation(h, session):
 
 
 async def test_money_flow_private_only(h, session):
-    await setup_company(h)
+    await setup_company(h, session)
     await h.say(OPERATOR, "/op ivan доставка 5", GROUP)
     entry = (await session.execute(select(WorkEntry))).scalar_one()
     await h.press(OWNER, f"w:c:{entry.id}", GROUP)
@@ -267,7 +300,7 @@ async def test_money_flow_private_only(h, session):
 
     out = await h.say(OWNER, "/report emp ivan xlsx")
     assert any(isinstance(c, SendDocument) for c in out)
-    out = texts(await h.say(OWNER, "/report dept @north"))
+    out = texts(await h.say(OWNER, "/report dept"))
     assert "Иван Иванов" in out
     out = texts(await h.say(OWNER, "/balance ivan"))
     assert "Остаток" in out
@@ -277,7 +310,7 @@ async def test_money_flow_private_only(h, session):
 
 async def test_wizard_survives_restart(h, session, sessionmaker):
     """Состояние мастера хранится в PostgreSQL: новый экземпляр бота продолжает начатый ввод."""
-    await setup_company(h)
+    await setup_company(h, session)
     emp = (await session.execute(select(Employee).where(Employee.code == "ivan"))).scalar_one()
     wt = (await session.execute(select(WorkType).where(WorkType.code == "доставка"))).scalar_one()
     await h.say(OPERATOR, "/op", GROUP)
@@ -291,17 +324,34 @@ async def test_wizard_survives_restart(h, session, sessionmaker):
 
 
 async def test_new_pricing_and_stock_commands(h, session):
-    await setup_company(h)
-    for cmd in (
-        "/coef_add срочно 1.5 Срочный заказ",
-        "/tariff доставка 400 dept=north tiers=10:450",
-        "/credit ivan 1000",
-    ):
-        out = texts(await h.say(OWNER, cmd))
-        assert "⚠️" not in out, (cmd, out)
-    assert "ступени" in texts(await h.say(OWNER, "/tariffs доставка")).lower() or "📈" in texts(
-        await h.say(OWNER, "/tariffs доставка")
+    dept, emp = await setup_company(h, session)
+    owner = await access.load_actor(session, OWNER, None, "Владелец")
+    settings = await get_settings(session)
+    delivery = (await session.execute(select(WorkType).where(WorkType.code == "доставка"))).scalar_one()
+
+    await tariffs.create_coefficient(session, owner, "срочно", Decimal("1.5"), "Срочный заказ")
+    await work.add_tariffs(
+        session,
+        owner,
+        settings,
+        work_type=delivery,
+        rate=Decimal("400"),
+        currency="USD",
+        department=dept,
+        employees=None,
+        valid_from=None,
+        tiers=[(Decimal(10), Decimal(450))],
     )
+    await payroll.set_credit_limit(session, owner, settings, emp, Decimal(1000), "USD")
+    await session.commit()
+
+    tariff_row = (
+        (await session.execute(select(Tariff).where(Tariff.work_type_id == delivery.id).order_by(Tariff.id.desc())))
+        .scalars()
+        .first()
+    )
+    assert await tariffs.tiers_of(session, tariff_row.id) == [(Decimal(10), Decimal(450))]
+
     out = texts(await h.say(OPERATOR, "/op ivan доставка 12 *срочно #C-1", GROUP))
     assert "срочно" in out
     entry = (await session.execute(select(WorkEntry))).scalar_one()
@@ -316,7 +366,7 @@ async def test_new_pricing_and_stock_commands(h, session):
     assert "⚠️" not in out, out
     out = texts(await h.say(OWNER, "/batches coffee"))
     assert "$6/кг" in out and "осталось 10 кг" in out
-    out = texts(await h.say(OWNER, "/stock @north"))
+    out = texts(await h.say(OWNER, "/stock"))
     assert "$60,00" in out
     # в группе себестоимость не видна
     assert "$" not in texts(await h.say(OPERATOR, "/stock", GROUP))
@@ -324,12 +374,14 @@ async def test_new_pricing_and_stock_commands(h, session):
     await h.say(OPERATOR, "/issue ivan coffee 4", GROUP)
     doc = (await session.execute(select(StockDocument).where(StockDocument.doc_type == "issue"))).scalar_one()
     await h.press(IVAN, f"sd:a:{doc.id}")
-    await h.say(OWNER, "/grant 30 storekeeper north")
+    operator_user = await access.find_user(session, str(OPERATOR))
+    await access.grant_role(session, owner, operator_user, "storekeeper", dept)
+    await session.commit()
     out = texts(await h.say(OPERATOR, "/inv ivan coffee 3", GROUP))
     assert "Недостача" in out
     out = texts(await h.say(OWNER, "/case 1 employee cost"))
     assert "себестоимость" in out and "6,00" in out
-    out = await h.say(OWNER, "/report stock @north xlsx")
+    out = await h.say(OWNER, "/report stock xlsx")
     assert any(isinstance(c, SendDocument) for c in out)
 
     # аванс в долг в пределах лимита
@@ -374,12 +426,12 @@ async def test_admin_panel_simple_setup(h, session):
     out = texts(await h.press(OWNER, "p:w:u:заказ"))
     assert "Сколько платим за 1 заказ" in out
     out = texts(await h.say(OWNER, "400 10:450"))
-    assert "Цена сохранена" in out and "$400" in out and "сверх 10 — $450" in out
+    assert "Цена сохранена" in out and "$400" in out and "сверх 10: $450" in out
     tariff = (await session.execute(select(Tariff))).scalar_one()
     assert tariff.currency == "USD" and tariff.employee_id is None
     assert (await session.execute(select(TariffTier))).scalar_one().threshold == Decimal(10)
     out = texts(await h.press(OWNER, "p:w"))
-    assert "Доставка</b> — $400 за заказ" in out
+    assert "Доставка</b>: $400 за заказ" in out
 
     # Фиксированная оплата: без вопроса про единицы
     await h.press(OWNER, "p:w:add")

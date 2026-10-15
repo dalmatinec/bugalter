@@ -1,25 +1,23 @@
-"""Панель управления на кнопках: /admin или «⚙️ Управление» в личке с ботом.
+"""Панель управления на кнопках: /admin или кнопка Управление в личке с ботом.
 
-Всё настраивается кнопками и короткими ответами — коды придумывать не нужно, бот создаёт их сам.
-Текстовые команды (/dept_add, /tariff …) продолжают работать для тех, кому так быстрее.
+Всё настраивается кнопками и короткими ответами, коды придумывать не нужно, бот создаёт их сам.
 """
 
 import datetime as dt
 from decimal import Decimal
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from ...db.models import (
     AuditLog,
     Department,
     Employee,
-    EmployeeDepartment,
     Product,
     Role,
     Tariff,
@@ -79,7 +77,7 @@ TOGGLES = {
     "group_show_amounts": "👁 Суммы в рабочих группах",
     "allow_self_confirm": "✍️ Автор может сам подтверждать",
     "payout_requires_confirmation": "💸 Выплату подтверждает второй человек",
-    "deduction_requires_consent": "🤝 Удержание — только с согласия сотрудника",
+    "deduction_requires_consent": "🤝 Удержание только с согласия сотрудника",
 }
 ACTION_TITLES = {
     "work.create": "внесена операция",
@@ -159,11 +157,11 @@ def rate_text(rate: Decimal, currency: str, method: str = "per_unit") -> str:
 
 HOME_TEXT = """⚙️ <b>Управление</b>
 
-👥 <b>Сотрудники</b> — добавить человека, бот даст ссылку для него
-💰 <b>Работы и цены</b> — за что платим и сколько
-💬 <b>Группы</b> — как подключить рабочую группу
+👥 <b>Сотрудники</b>: добавить человека, бот даст ссылку для него
+💰 <b>Работы и цены</b>: за что платим и сколько
+💬 <b>Группы</b>: как подключить рабочую группу
 
-Остальное (доплаты, склад, настройки, доступ) — в «Ещё»."""
+Остальное (доплаты, склад, настройки, доступ) - в разделе Ещё."""
 
 
 def home_markup() -> InlineKeyboardMarkup:
@@ -177,12 +175,12 @@ def home_markup() -> InlineKeyboardMarkup:
 
 MORE_TEXT = """➕ <b>Ещё</b>
 
-⚡ <b>Доплаты</b> — коэффициенты: «срочно ×1,5», «выходной ×2»
-📦 <b>Товары</b> — если ведёте склад
-⚙️ <b>Настройки</b> — валюта, часовой пояс, периоды выплат, лимиты
-🔑 <b>Доступ</b> — кто что может (обычно хватает выбора при добавлении сотрудника)
-🏢 <b>Филиалы</b> — только если у вас несколько точек со своими сотрудниками и складом
-📜 <b>Журнал</b> — кто что менял"""
+⚡ <b>Доплаты</b>: коэффициенты, например срочно ×1,5 или выходной ×2
+📦 <b>Товары</b>: если ведёте склад
+⚙️ <b>Настройки</b>: валюта, часовой пояс, периоды выплат, лимиты
+🔑 <b>Доступ</b>: кто что может (обычно хватает выбора при добавлении сотрудника)
+🏢 <b>Филиалы</b>: только если у вас несколько точек со своими сотрудниками и складом
+📜 <b>Журнал</b>: кто что менял"""
 
 
 def more_markup() -> InlineKeyboardMarkup:
@@ -191,7 +189,6 @@ def more_markup() -> InlineKeyboardMarkup:
             [("⚡ Доплаты", "p:c"), ("📦 Товары", "p:pr")],
             [("⚙️ Настройки", "p:s"), ("🔑 Доступ", "p:a")],
             [("🏢 Филиалы", "p:d"), ("📜 Журнал", "p:j")],
-            [("⌨️ Текстовые команды", "p:help")],
             [("⬅️ В меню", "p:home")],
         ]
     )
@@ -219,35 +216,22 @@ async def home(callback: CallbackQuery, state: FSMContext, notifier):
     _show(callback, notifier, HOME_TEXT, home_markup())
 
 
-@router.callback_query(F.data == "p:help")
-async def text_help(callback: CallbackQuery, notifier):
-    from .admin import ADMIN_HELP
-
-    _show(callback, notifier, ADMIN_HELP, _kb([[("⬅️ Назад", "p:more")]]))
-
-
 # ------------------------------------------------------------------ подразделения
 
 
 async def departments_view(session):
     depts = await org.list_departments(session)
+    counts = await org.department_counts(session)
     lines = [
         "🏢 <b>Филиалы</b>",
-        "Филиал — отдельная точка (магазин, склад, город) со своими сотрудниками, складом и отчётами.",
-        "<b>Если точка одна — здесь ничего делать не нужно</b>, всё уже настроено.",
+        "Филиал - это отдельная точка: магазин, склад или город со своими сотрудниками, складом и отчётами.",
+        "<b>Если точка одна, здесь ничего делать не нужно</b>, всё уже настроено.",
         "",
     ]
     rows = []
     for dept in depts:
-        members = (
-            await session.execute(
-                select(func.count())
-                .select_from(EmployeeDepartment)
-                .where(EmployeeDepartment.department_id == dept.id, EmployeeDepartment.is_active)
-            )
-        ).scalar_one()
-        chats = len(await org.department_chats(session, dept.id))
-        lines.append(f"• <b>{h(dept.name)}</b> — сотрудников: {members}, групп: {chats}")
+        members, chats = counts.get(dept.id, (0, 0))
+        lines.append(f"• <b>{h(dept.name)}</b>: сотрудников {members}, групп {chats}")
         rows.append([(f"🏢 {dept.name}", f"p:d:v:{dept.id}")])
     rows.append([("➕ Добавить филиал", "p:d:add")])
     rows.append([("⬅️ Назад", "p:more")])
@@ -265,11 +249,11 @@ async def department_view(session, dept_id: int):
     if dept is None:
         raise NotFound("Подразделение не найдено")
     employees = await org.department_employees(session, dept.id)
-    chats = [c for c, d, _ in await org.list_chats(session) if d.id == dept.id]
+    chats = await org.chats_of_department(session, dept.id)
     lines = [f"🏢 <b>{h(dept.name)}</b>  <i>код для команд: {h(dept.code)}</i>", "", "<u>Сотрудники</u>"]
     lines += [f"• {h(e.full_name)}" for e in employees] or ["нет"]
     lines += ["", "<u>Рабочие группы</u>"]
-    lines += [f"• {h(c.title or str(c.chat_id))}" for c in chats] or ["нет — добавьте бота в группу"]
+    lines += [f"• {h(c.title or str(c.chat_id))}" for c in chats] or ["нет, добавьте бота в группу"]
     markup = _kb(
         [
             [("➕ Новый сотрудник сюда", f"p:e:add:{dept.id}")],
@@ -307,7 +291,7 @@ async def form_dept_name(message, state, session, actor, notifier, data, **_):
     dept = await org.create_department(session, actor, code, name)
     await state.clear()
     await session.flush()
-    notifier.answer(message, f"✅ Филиал «{h(dept.name)}» создан.", None)
+    notifier.answer(message, f"✅ Филиал {h(dept.name)} создан.", None)
     notifier.answer(message, *await department_view(session, dept.id))
 
 
@@ -373,12 +357,12 @@ async def employee_view(session, settings, emp_id: int):
                 )
             )
         else:
-            lines.append("🔑 Работник — видит свою работу и зарплату")
+            lines.append("🔑 Работник, видит свою работу и зарплату")
     else:
-        lines.append("⏳ Ещё не подключился — отправьте ему ссылку (кнопка ниже)")
+        lines.append("⏳ Ещё не подключился, отправьте ему ссылку (кнопка ниже)")
     credit = await payroll.credit_limit(session, settings, emp.id, settings.currency)
     lines.append(f"💳 Аванс в долг: {'до ' + fmt_money(credit, settings.currency) if credit else 'нельзя'}")
-    personal = [c for c, _, e in await org.list_chats(session) if e and e.id == emp.id]
+    personal = await org.chats_of_employee(session, emp.id)
     if personal:
         lines.append("💬 Личная группа: " + ", ".join(h(c.title or str(c.chat_id)) for c in personal))
     rates = (
@@ -445,7 +429,7 @@ async def _invite_text(bot: Bot, session, actor, emp: Employee, role_code: str |
     link = f"https://t.me/{me.username}?start=inv_{token}"
     return (
         f"🔗 <b>Ссылка для {h(emp.full_name)}</b>\n{link}\n\n"
-        "Перешлите её человеку. Он откроет её и нажмёт «Запустить» — и всё, он подключён. "
+        "Перешлите её человеку. Он откроет её и нажмёт кнопку Запустить, и всё, он подключён. "
         "Ссылка одноразовая, действует 7 дней."
     )
 
@@ -463,8 +447,9 @@ async def form_emp_name(message, state, session, actor, settings, notifier, data
     if dept is not None:
         await org.attach_to_department(session, actor, emp, dept)
     await session.flush()
-    rows = [[(f"{title} — {hint}", f"p:e:who:{emp.id}:{code_}")] for code_, (title, hint) in WHO.items()]
-    notifier.answer(message, f"✅ {h(emp.full_name)} добавлен. Кто он?", _kb(rows))
+    rows = [[(title, f"p:e:who:{emp.id}:{code_}")] for code_, (title, _hint) in WHO.items()]
+    hints = "\n".join(f"{title}: {hint}" for title, hint in WHO.values())
+    notifier.answer(message, f"✅ {h(emp.full_name)} добавлен. Кто он?\n\n{hints}", _kb(rows))
 
 
 @router.callback_query(F.data.startswith("p:e:who:"))
@@ -473,7 +458,7 @@ async def employee_who(callback: CallbackQuery, session, actor, settings, notifi
     emp = await session.get(Employee, int(emp_id))
     text = await _invite_text(bot, session, actor, emp, None if role == "none" else role)
     if role != "none":
-        text += f"\nКогда подключится, получит роль «{WHO[role][0][2:]}»."
+        text += f"\nКогда подключится, получит роль {WHO[role][0][2:]}."
     if not await org.employee_department_ids(session, emp.id):
         _show(
             callback,
@@ -494,7 +479,7 @@ async def _dept_choice(session, prefix: str, exclude: set[int] | None = None, on
             continue
         rows.append([(f"🏢 {dept.name}", f"{prefix}:{dept.id}")])
     if not rows:
-        rows.append([("➕ Сначала создайте филиал", "p:d:add")])
+        rows.append([("➕ Создать филиал", "p:d:add")])
     rows.append([("⬅️ Назад", "p:e")])
     return _kb(rows)
 
@@ -559,7 +544,7 @@ async def employee_credit(callback: CallbackQuery, state: FSMContext, session, s
         callback,
         notifier,
         f"💳 Сколько можно выдать {h(emp.full_name)} <b>сверх заработанного</b> (аванс в долг), "
-        f"в {currency_label(settings.currency)}?\nНапишите число, например <b>500</b>. 0 — запретить.\n"
+        f"в {currency_label(settings.currency)}?\nНапишите число, например <b>500</b>. 0 значит запретить.\n"
         "Долг автоматически гасится из следующих начислений.",
         _cancel_kb(f"p:e:v:{emp.id}"),
     )
@@ -587,11 +572,11 @@ async def employee_role(callback: CallbackQuery, session, notifier):
 
 async def _roles_help(session) -> str:
     return (
-        "• <b>Оператор</b> — вносит операции и складские движения в группе\n"
-        "• <b>Руководитель</b> — подтверждает операции, премии/штрафы, выплаты, ставки своего подразделения\n"
-        "• <b>Кладовщик</b> — склад и инвентаризация\n"
-        "• <b>Бухгалтер</b> — выплаты, премии, отчёты\n"
-        "• <b>Администратор</b> — всё, кроме прав владельца\n"
+        "• <b>Оператор</b>: вносит операции и складские движения в группе\n"
+        "• <b>Руководитель</b>: подтверждает операции, премии и штрафы, выплаты, ставки своего подразделения\n"
+        "• <b>Кладовщик</b>: склад и инвентаризация\n"
+        "• <b>Бухгалтер</b>: выплаты, премии, отчёты\n"
+        "• <b>Администратор</b>: всё, кроме прав владельца\n"
         "Сотруднику без роли бот показывает только его работу и расчёт."
     )
 
@@ -621,7 +606,7 @@ async def role_scope(callback: CallbackQuery, session, actor, settings, notifier
         rows.append([(f"🏢 {dept.name}", f"p:a:rg:{user_id}:{role_code}:{dept.id}")])
     rows.append([("⬅️ Назад", "p:a")])
     role_name = (await _role_names(session)).get(role_code, role_code)
-    _show(callback, notifier, f"Роль «{h(role_name)}» — в каком филиале?", _kb(rows))
+    _show(callback, notifier, f"Роль {h(role_name)}: в каком филиале?", _kb(rows))
 
 
 @router.callback_query(F.data.startswith("p:a:rg:"))
@@ -635,7 +620,7 @@ async def role_grant(callback: CallbackQuery, session, actor, settings, notifier
     notifier.toast(callback, "Роль выдана")
     notifier.send(
         user.telegram_id,
-        f"Вам выдана роль «{h(role_name)}». Справка: /help",
+        f"Вам выдана роль {h(role_name)}. Справка: /help",
     )
     emp = (await session.execute(select(Employee).where(Employee.user_id == user.id))).scalar_one_or_none()
     if emp:
@@ -651,7 +636,7 @@ async def employee_rate(callback: CallbackQuery, session, notifier):
         [(f"🛠 {wt.name}", f"p:w:x:{wt.id}:{emp_id}")] for wt in await tariffs.list_work_types(session) if wt.is_active
     ]
     if not rows:
-        rows.append([("➕ Сначала добавьте работу", "p:w:add")])
+        rows.append([("➕ Добавить работу", "p:w:add")])
     rows.append([("⬅️ Назад", f"p:e:v:{emp_id}")])
     _show(callback, notifier, "💰 Для какой работы своя цена?", _kb(rows))
 
@@ -673,10 +658,10 @@ async def access_view(session):
         )
         scope = dept.name if dept else "все филиалы"
         role_name = role_names.get(g.role_code, g.role_code)
-        lines.append(f"• {h(who)} — <b>{h(role_name)}</b> ({h(scope)})")
+        lines.append(f"• {h(who)}: <b>{h(role_name)}</b> ({h(scope)})")
         if g.role_code != OWNER_ROLE:
             rows.append([(f"❌ {who}: {role_name}", f"p:a:rv:{g.id}")])
-    rows.append([("➕ Выдать роль по Telegram ID", "p:a:id")])
+    rows.append([("➕ Выдать роль по ID", "p:a:id")])
     rows.append([("📖 Что умеют роли", "p:a:help")])
     rows.append([("⬅️ Назад", "p:more")])
     return "\n".join(lines), _kb(rows)
@@ -752,10 +737,10 @@ async def works_view(session, settings):
         elif base and wt.calc_method == "fixed":
             price += " за раз"
         state = "" if wt.is_active else " (выключена)"
-        lines.append(f"• <b>{h(wt.name)}</b>{state} — {price}")
+        lines.append(f"• <b>{h(wt.name)}</b>{state}: {price}")
         rows.append([(f"{wt.name}", f"p:w:v:{wt.id}")])
     if not rows:
-        lines.append("Пока пусто. Добавьте первую работу, например «Доставка» 👇")
+        lines.append("Пока пусто. Добавьте первую работу, например Доставка 👇")
     rows.append([("➕ Добавить работу", "p:w:add")])
     rows.append([("⬅️ В меню", "p:home")])
     return "\n".join(lines), _kb(rows)
@@ -775,29 +760,30 @@ async def work_view(session, settings, wt_id: int):
     lines = [
         f"💰 <b>{h(wt.name)}</b>",
         f"Оплата: {METHOD_TITLES[wt.calc_method]}"
-        + (f", считаем в «{h(wt.unit_code)}»" if wt.calc_method == "per_unit" else ""),
+        + (f", считаем в {h(wt.unit_code)}" if wt.calc_method == "per_unit" else ""),
     ]
     if not wt.is_active:
-        lines.append("⏸ Выключена — при вводе работы не показывается")
+        lines.append("⏸ Выключена, при вводе работы не показывается")
     lines += ["", "<u>Цены</u>"]
     rates = await tariffs.current_rates(session, wt.id, today)
+    single_dept = len(await org.active_departments(session)) == 1
     for tariff, dept_name, emp_name, tiers, future in rates:
         scope = emp_name or dept_name or "для всех"
-        if dept_name and not emp_name and len(await org.active_departments(session)) == 1:
+        if dept_name and not emp_name and single_dept:
             scope = "для всех"
         if emp_name and dept_name:
             scope = f"{emp_name} ({dept_name})"
         line = f"• {h(scope)}: <b>{rate_text(tariff.rate, tariff.currency, wt.calc_method)}</b>"
         if tiers:
             line += " · ступени: " + ", ".join(
-                f"сверх {fmt_number(t)} — {rate_text(r, tariff.currency)}" for t, r in tiers
+                f"сверх {fmt_number(t)}: {rate_text(r, tariff.currency)}" for t, r in tiers
             )
         line += f" с {tariff.valid_from:%d.%m.%Y}" if future else ""
         if future:
             line += " (будущая)"
         lines.append(line)
     if not rates:
-        lines.append("⚠️ Цена не задана — внести эту работу пока нельзя")
+        lines.append("⚠️ Цена не задана, внести эту работу пока нельзя")
     if any(r[2] for r in rates):
         lines.append("\nСвоя цена сотрудника важнее общей.")
     rows = [
@@ -849,7 +835,7 @@ async def form_wt_name(message, state, session, notifier, **_):
     await state.update_data(wt_name=name)
     rows = [[(title, f"p:w:m:{code}")] for title, code in PAY_BUTTONS]
     rows.append([("✖️ Отмена", "p:w")])
-    notifier.answer(message, f"«{h(name)}» — как платим?", _kb(rows))
+    notifier.answer(message, f"{h(name)}: как платим?", _kb(rows))
 
 
 @router.callback_query(F.data.startswith("p:w:m:"))
@@ -863,7 +849,9 @@ async def work_method(callback: CallbackQuery, state: FSMContext, session, actor
         units = [(u, f"p:w:u:{u}") for u in COMMON_UNITS]
         grid = [units[i : i + 3] for i in range(0, len(units), 3)]
         grid.append([("Другое…", "p:w:u:*"), ("✖️ Отмена", "p:w")])
-        _show(callback, notifier, f"«{h(data['wt_name'])}» — за что платим? (за заказ, за штуку, за кг…)", _kb(grid))
+        _show(
+            callback, notifier, f"{h(data['wt_name'])}: за что платим? Например, за заказ, за штуку, за кг.", _kb(grid)
+        )
         return
     await _create_work(
         callback, state, session, actor, settings, notifier, method, "сумма" if method == "percent" else "шт"
@@ -902,10 +890,10 @@ async def _rate_scope(event, session, wt_id: int, notifier, created: bool = Fals
     wt = await session.get(WorkType, wt_id)
     rows = [[("🌐 Для всех", f"p:w:s:{wt.id}:0")]]
     for dept in await org.list_departments(session):
-        rows.append([(f"🏢 Филиал «{dept.name}»", f"p:w:s:{wt.id}:{dept.id}")])
+        rows.append([(f"🏢 {dept.name}", f"p:w:s:{wt.id}:{dept.id}")])
     rows.append([("👤 Для конкретного сотрудника", f"p:w:e:{wt.id}")])
     rows.append([("⬅️ Назад", f"p:w:v:{wt.id}")])
-    _show(event, notifier, f"💰 Цена «{h(wt.name)}» — для кого?", _kb(rows))
+    _show(event, notifier, f"💰 Цена {h(wt.name)}: для кого?", _kb(rows))
 
 
 @router.callback_query(F.data.startswith("p:w:t:"))
@@ -933,9 +921,10 @@ def _rate_prompt(wt: WorkType, settings, scope: str) -> str:
     else:
         what = (
             f"💰 Сколько платим за 1 {h(wt.unit_code)}{who}? Напишите сумму в {cur}, например <b>400</b>\n\n"
-            f"<i>Если цена растёт с объёмом за полмесяца: <b>400 50:450</b> — первые 50 по {cur}400, дальше по {cur}450</i>"
+            f"<i>Если цена растёт с объёмом за полмесяца, например <b>400 50:450</b>: "
+            f"первые 50 по {cur}400, дальше по {cur}450</i>"
         )
-    return f"«{h(wt.name)}»\n{what}"
+    return f"{h(wt.name)}\n{what}"
 
 
 @router.callback_query(F.data.startswith("p:w:s:") | F.data.startswith("p:w:x:"))
@@ -967,7 +956,7 @@ async def form_tariff_rate(message, state, session, actor, settings, notifier, d
         tiers.append((parse_decimal(threshold, what="порог"), parse_decimal(tier_rate, allow_zero=True, what="ставку")))
     dept = await session.get(Department, data["dept_id"]) if data.get("dept_id") else None
     if dept is None and not actor.can(Perm.TARIFF_MANAGE):
-        # Руководитель с правами на свою точку: «для всех» = для его точки.
+        # Руководитель с правами на свою точку: "для всех" = для его точки.
         dept = await org.single_department(session)
     employees = [await session.get(Employee, data["emp_id"])] if data.get("emp_id") else None
     _, repriced = await work.add_tariffs(
@@ -1001,7 +990,7 @@ async def coefs_view(session):
     rows = []
     for coef in await tariffs.list_coefficients(session):
         state = "" if coef.is_active else " (выключен)"
-        lines.append(f"• <b>*{h(coef.code)}</b> ×{fmt_number(coef.factor)} — {h(coef.name)}{state}")
+        lines.append(f"• <b>*{h(coef.code)}</b> ×{fmt_number(coef.factor)}: {h(coef.name)}{state}")
         rows.append([(("⏸ " if coef.is_active else "▶️ ") + f"*{coef.code}", f"p:c:tg:{coef.code}")])
     rows.append([("➕ Новый коэффициент", "p:c:add")])
     rows.append([("⬅️ Назад", "p:more")])
@@ -1103,7 +1092,7 @@ async def form_product_name(message, state, session, notifier, **_):
     units = [(f"{u.code}", f"p:pr:u:{u.code}") for u in await reference.list_units(session)]
     grid = [units[i : i + 3] for i in range(0, len(units), 3)]
     grid.append([("✖️ Отмена", "p:pr")])
-    notifier.answer(message, f"«{h(name)}» — в чём ведём учёт на складе?", _kb(grid))
+    notifier.answer(message, f"{h(name)}: в чём ведём учёт на складе?", _kb(grid))
 
 
 @router.callback_query(F.data.startswith("p:pr:u:"))
@@ -1157,22 +1146,23 @@ GROUPS_HELP = """💬 <b>Группы</b>
 
 <b>Как подключить:</b>
 1. Создайте группу в Telegram и добавьте туда людей и этого бота.
-2. Бот сам спросит в группе, чья она — нажмите кнопку:
-   👥 <b>Общая</b> — работу вносят по любому сотруднику;
-   👤 <b>Группа сотрудника</b> — личный чат с одним человеком, бот сразу подставляет его.
+2. Бот сам спросит в группе, чья она, нажмите кнопку:
+   👥 <b>Общая</b>: работу вносят по любому сотруднику
+   👤 <b>Группа сотрудника</b>: личный чат с одним человеком, бот сразу подставляет его
 
-В группах суммы не видны — зарплату каждый смотрит в личке с ботом."""
+В группах суммы не видны, зарплату каждый смотрит в личке с ботом."""
 
 
 async def groups_view(session):
     lines = [GROUPS_HELP, "", "<b>Подключены:</b>"]
     rows = []
+    multi_dept = len(await org.active_departments(session)) > 1
     for chat, dept, emp in await org.list_chats(session):
         kind = f"группа сотрудника {emp.full_name}" if emp else "общая"
         title = chat.title or str(chat.chat_id)
-        where = f"{h(dept.name)}, " if len(await org.active_departments(session)) > 1 else ""
-        lines.append(f"• {h(title)} — {where}{h(kind)}")
-        rows.append([(f"❌ Отвязать «{title[:30]}»", f"p:g:x:{chat.chat_id}")])
+        where = f"{h(dept.name)}, " if multi_dept else ""
+        lines.append(f"• {h(title)}: {where}{h(kind)}")
+        rows.append([(f"❌ Отвязать {title[:30]}", f"p:g:x:{chat.chat_id}")])
     if not rows:
         lines.append("пока нет")
     rows.append([("⬅️ В меню", "p:home")])
@@ -1217,30 +1207,24 @@ async def _ask_bind(chat_id: int, session, notifier) -> None:
 
 
 @router.message(Command("bind"))
-async def bind(message: Message, command: CommandObject, session, actor, notifier, is_private):
+async def bind(message: Message, session, actor, notifier, is_private):
+    """Запасной способ подключить группу, если бот не спросил об этом сам при входе."""
     if is_private:
-        raise ValidationError("Команду /bind нужно написать в рабочей группе")
+        raise ValidationError("Эту команду нужно написать в рабочей группе")
     if not actor.can_anywhere(Perm.ORG_MANAGE):
         raise AccessDenied("Подключить группу может владелец или администратор")
-    items = (command.args or "").split()
-    if not items:
-        await _ask_bind(message.chat.id, session, notifier)
-        return
-    dept = await org.get_department(session, items[0])
-    emp = await org.get_employee(session, items[1]) if len(items) > 1 else None
-    await org.bind_chat(session, actor, message.chat.id, message.chat.title or "", dept, emp)
-    notifier.answer(message, _bound_text(dept, emp))
+    await _ask_bind(message.chat.id, session, notifier)
 
 
 def _bound_text(dept: Department, emp: Employee | None) -> str:
     if emp:
         return (
             f"✅ Это группа сотрудника <b>{h(emp.full_name)}</b>.\n"
-            "Внести работу: /op — выбрать работу и количество. Или одной строкой: <code>/op доставка 3</code>"
+            "Внести работу: /op, выбрать работу и количество. Или одной строкой: <code>/op доставка 3</code>"
         )
     return (
         "✅ Группа подключена.\n"
-        "Внести работу: /op — выбрать сотрудника, работу и количество. "
+        "Внести работу: /op, выбрать сотрудника, работу и количество. "
         "Или одной строкой: <code>/op иван доставка 3</code>"
     )
 
@@ -1263,7 +1247,7 @@ async def bind_finish(callback: CallbackQuery, session, actor, notifier):
 
 @router.my_chat_member()
 async def bot_added(event: ChatMemberUpdated, session, actor, notifier):
-    """Бота добавили в группу — сразу спрашиваем, чья это группа."""
+    """Бота добавили в группу, сразу спрашиваем, чья это группа."""
     if event.chat.type == "private":
         return
     was_in = event.old_chat_member.status in ("member", "administrator", "creator")
@@ -1272,7 +1256,7 @@ async def bot_added(event: ChatMemberUpdated, session, actor, notifier):
         return
     dept, _ = await org.chat_binding(session, event.chat.id)
     if dept is not None:
-        notifier.send(event.chat.id, f"Я снова здесь. Группа подключена к «{h(dept.name)}».")
+        notifier.send(event.chat.id, f"Я снова здесь. Группа подключена к {h(dept.name)}.")
         return
     if actor is not None and actor.can_anywhere(Perm.ORG_MANAGE):
         await _ask_bind(event.chat.id, session, notifier)
@@ -1295,7 +1279,7 @@ async def settings_view(settings):
         "",
         f"💱 Валюта: <b>{currency_label(settings.currency)} ({settings.currency})</b>",
         f"🕐 Часовой пояс: <b>{h(tz_title)}</b>",
-        f"📅 Расчётные периоды: <b>1–{settings.payroll_split_day} и {settings.payroll_split_day + 1}–конец месяца</b>",
+        f"📅 Расчётные периоды: <b>1-{settings.payroll_split_day} и {settings.payroll_split_day + 1}-конец месяца</b>",
         f"🔢 Округление: <b>{ROUNDING_TITLES.get(settings.rounding_mode, settings.rounding_mode)}</b>",
         f"📉 Лимит удержаний: <b>{limit}</b>",
         f"💳 Аванс в долг по умолчанию: <b>{fmt_money(settings.default_credit_limit, settings.currency) if settings.default_credit_limit else 'нельзя'}</b>",
@@ -1352,7 +1336,7 @@ async def settings_tz(callback: CallbackQuery, notifier):
     buttons = [(title, f"p:s:tz:{i}") for i, (title, _) in enumerate(TIMEZONES)]
     grid = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
     grid.append([("✏️ Другой", "p:s:in:timezone"), ("⬅️ Назад", "p:s")])
-    _show(callback, notifier, "🕐 Часовой пояс: по нему считаются «сегодня» и границы периодов.", _kb(grid))
+    _show(callback, notifier, "🕐 Часовой пояс: по нему считаются сегодня и границы периодов.", _kb(grid))
 
 
 @router.callback_query(F.data.startswith("p:s:tz:"))
@@ -1363,7 +1347,7 @@ async def settings_tz_set(callback: CallbackQuery, session, actor, notifier):
 
 @router.callback_query(F.data == "p:s:split")
 async def settings_split(callback: CallbackQuery, notifier):
-    grid = [[(f"1–{d} и {d + 1}–конец", f"p:s:v:payroll_split_day:{d}")] for d in (10, 14, 15, 20)]
+    grid = [[(f"1-{d} и {d + 1}-конец", f"p:s:v:payroll_split_day:{d}")] for d in (10, 14, 15, 20)]
     grid.append([("✏️ Другой день", "p:s:in:payroll_split_day"), ("⬅️ Назад", "p:s")])
     _show(callback, notifier, "📅 Выплаты два раза в месяц: где граница первой половины?", _kb(grid))
 
@@ -1395,7 +1379,7 @@ async def settings_credit(callback: CallbackQuery, state: FSMContext, notifier):
     _show(
         callback,
         notifier,
-        "💳 Сколько по умолчанию можно выдать сверх заработанного? Напишите число (0 — нельзя).\n"
+        "💳 Сколько по умолчанию можно выдать сверх заработанного? Напишите число (0 значит нельзя).\n"
         "Каждому сотруднику можно задать своё в его карточке.",
         _cancel_kb("p:s"),
     )
@@ -1491,7 +1475,7 @@ async def accept_invite_start(message: Message, token: str, session, actor, noti
     notifier.answer(
         message,
         f"✅ Готово! Вы подключены как <b>{h(emp.full_name)}</b>.{role_note}\n"
-        "Здесь, в личке, — ваша работа, зарплата и выплаты (кнопки внизу).",
+        "Здесь, в личке, ваша работа, зарплата и выплаты (кнопки внизу).",
         ui.main_menu(can_admin(actor)),
     )
     if creator is not None:

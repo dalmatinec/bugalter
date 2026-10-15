@@ -327,7 +327,7 @@ async def sign_adjustment(
     if adj.status in ("approved", "awaiting_consent"):
         return adj, None, False
     if adj.status != "pending":
-        raise Conflict(f"{adj.number}: подписать нельзя — {ADJ_STATUS_TITLES[adj.status]}")
+        raise Conflict(f"{adj.number}: подписать нельзя, статус {ADJ_STATUS_TITLES[adj.status]}")
     actor.require(Perm.PAYROLL_SIGN, adj.department_id)
     if not actor.is_owner:
         if actor.is_self(adj.employee_id):
@@ -616,8 +616,8 @@ def _funds_message(can_pay: Decimal, credit: Decimal, currency: str, minor: int,
     if kind == "salary":
         return text + ". Сверх заработанного можно выдать только аванс или выплату по запросу"
     if credit > 0:
-        return text + f", аванс в долг — до {fmt_money(credit, currency, minor)} сверх этого"
-    return text + ". Аванс в долг сотруднику не разрешён: /credit <сотрудник> <лимит>"
+        return text + f", аванс в долг: до {fmt_money(credit, currency, minor)} сверх этого"
+    return text + ". Аванс в долг сотруднику не разрешён: включите его в карточке сотрудника"
 
 
 async def credit_limit(session: AsyncSession, settings: Settings, employee_id: int, currency: str) -> Decimal:
@@ -636,7 +636,7 @@ async def set_credit_limit(
     currency_code = (currency or settings.currency).upper()
     cur = await _currency(session, currency_code)
     if amount < 0 or scale_of(amount) > cur.minor_units:
-        raise ValidationError("Лимит — неотрицательная сумма в валюте")
+        raise ValidationError("Лимит должен быть неотрицательной суммой в валюте")
     stmt = insert(EmployeeCreditLimit).values(
         employee_id=employee.id, currency=currency_code, amount=amount, set_by=actor.user.id
     )
@@ -929,7 +929,7 @@ async def reopen_period(session: AsyncSession, actor, period_id: int, reason: st
         )
     ).scalar_one()
     if later_closed:
-        raise Conflict("Сначала переоткройте более поздние закрытые периоды — иначе их входящие остатки разойдутся")
+        raise Conflict("Сначала переоткройте более поздние закрытые периоды, иначе их входящие остатки разойдутся")
     period.status = "open"
     session.add(PeriodReopening(period_id=period.id, reopened_by=actor.user.id, reason=reason.strip()))
     await audit(session, actor.user.id, "period.reopen", "payroll_period", period.id, {"reason": reason})
@@ -1040,7 +1040,7 @@ async def build_statement(
             .where(LedgerEntry.employee_id == employee.id, LedgerEntry.business_date < date_from)
             .group_by(LedgerEntry.currency)
         )
-        title = f"{date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}"
+        title = f"{date_from:%d.%m.%Y}-{date_to:%d.%m.%Y}"
 
     currencies: dict[str, CurrencyStatement] = {}
     minor = dict((await session.execute(select(Currency.code, Currency.minor_units))).all())

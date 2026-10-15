@@ -158,7 +158,7 @@ async def grant_role(
     actor.require(Perm.ACCESS_MANAGE, department_id)
     role = await session.get(Role, role_code)
     if role is None:
-        raise NotFound(f"Нет роли {role_code}. Список: /roles")
+        raise NotFound(f"Нет роли {role_code}")
     if (role.code == OWNER_ROLE or OWNER_ONLY_PERMS & set(role.permissions)) and not actor.is_owner:
         raise AccessDenied("Эту роль может выдать только владелец")
     if not actor.is_owner:
@@ -230,7 +230,7 @@ async def create_role(session: AsyncSession, actor: Actor, code: str, name: str,
         raise ValidationError("Права владельца нельзя включать в другие роли")
     role = await session.get(Role, code)
     if role is not None and role.is_system:
-        raise ValidationError("Системные роли не редактируются — создайте новую")
+        raise ValidationError("Системные роли не редактируются, создайте новую")
     if role is None:
         role = Role(code=code, name=name, permissions=sorted(set(perms)), is_system=False)
         session.add(role)

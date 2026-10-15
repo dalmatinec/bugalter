@@ -23,7 +23,7 @@ def need(items: list[str], count: int, usage: str) -> None:
 def parse_id(raw: str) -> int:
     digits = re.sub(r"\D", "", raw or "")
     if not digits:
-        raise ValidationError(f"Не понимаю номер: «{raw}»")
+        raise ValidationError(f"Не понимаю номер: {raw}")
     return int(digits)
 
 
@@ -35,7 +35,7 @@ class Extracted:
 
 
 def extract(items: list[str], option_keys: tuple[str, ...] = ()) -> Extracted:
-    """Вынимает «@подразделение» и опции вида key=value."""
+    """Вынимает "@подразделение" и опции вида key=value."""
     rest, dept, options = [], None, {}
     for item in items:
         if item.startswith("@") and len(item) > 1 and dept is None:
@@ -76,7 +76,7 @@ class Tail:
 
 
 def parse_tail(items: list[str]) -> Tail:
-    """Хвост операции: «#A-1052 вчера *срочно комментарий» в любом порядке (*код — коэффициент)."""
+    """Хвост операции: "#A-1052 вчера *срочно комментарий" в любом порядке (*код: коэффициент)."""
     tail = Tail()
     comment = []
     for item in items:

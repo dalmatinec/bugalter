@@ -53,7 +53,7 @@ async def add_unit(session: AsyncSession, actor, code: str, scale: int, name: st
     if not 0 <= scale <= 6:
         raise ValidationError("Точность единицы: от 0 до 6 знаков")
     if await session.get(Unit, code) is not None:
-        raise ValidationError(f"Единица «{code}» уже есть. Единицы не изменяются, чтобы не исказить историю")
+        raise ValidationError(f"Единица {code} уже есть. Единицы не изменяются, чтобы не исказить историю")
     unit = Unit(code=code, name=name or code, scale=scale)
     session.add(unit)
     await audit(session, actor.user.id, "unit.add", "unit", code, {"scale": scale, "name": name})
@@ -76,14 +76,14 @@ async def add_currency(session: AsyncSession, actor, code: str, minor_units: int
 async def get_unit(session: AsyncSession, code: str) -> Unit:
     unit = await session.get(Unit, code)
     if unit is None:
-        raise ValidationError(f"Нет единицы «{code}». Список: /units")
+        raise ValidationError(f"Нет такой единицы измерения: {code}")
     return unit
 
 
 async def get_currency(session: AsyncSession, code: str) -> Currency:
     currency = await session.get(Currency, code.upper())
     if currency is None:
-        raise ValidationError(f"Нет валюты {code}. Добавьте: /currency_add {code.upper()} 2 Название")
+        raise ValidationError(f"Валюта {code.upper()} не поддерживается. Доступны: USD, EUR, RUB, KZT, UZS, KGS")
     return currency
 
 
