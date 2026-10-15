@@ -121,12 +121,19 @@ async def _create_request(message, session, actor, settings, notifier, amount_te
     kb = InlineKeyboardBuilder()
     if req.status == "requested":
         kb.button(text="🚫 Отменить запрос", callback_data=f"rq:x:{req.id}")
-    notifier.answer(message, "Просьба отправлена:\n" + await ui.request_card(session, req), kb.as_markup())
+    notifier.answer(
+        message,
+        "Просьба отправлена. Когда её одобрят, бот запишет аванс и напишет вам.\n\n"
+        + await ui.request_card(session, req),
+        kb.as_markup(),
+    )
     if created:
         dept = await org.default_department_id(session, actor.employee.id)
         card = await ui.request_card(session, req)
-        for user in await access.users_with_perm(session, Perm.PAYROLL_PAYOUT, dept):
-            notifier.send(user.telegram_id, "Сотрудник просит аванс:\n" + card, ui.request_kb(req))
+        # По умолчанию просьбу решает владелец: одобрил, и бот сразу записал аванс.
+        owner_only = settings.payout_confirm_owner_only
+        for user in await access.deciders(session, Perm.PAYROLL_PAYOUT_CONFIRM, dept, owner_only):
+            notifier.send(user.telegram_id, "🙋 Сотрудник просит аванс:\n" + card, ui.request_kb(req))
 
 
 @router.message(Command("request_payout"))

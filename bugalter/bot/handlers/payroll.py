@@ -7,7 +7,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from ...db.models import Employee, User
+from ...db.models import Employee, PayoutRequest, User
 from ...domain.dates import parse_range
 from ...domain.errors import AccessDenied, ValidationError
 from ...domain.money import fmt_money, parse_decimal
@@ -180,7 +180,7 @@ async def payout(message: Message, command: CommandObject, session, actor, setti
             if user.id != actor.user.id:
                 notifier.send(user.telegram_id, "Выплата ждёт подтверждения:\n" + card, ui.payout_kb(p))
     elif (tg := await _employee_tg(session, p.employee_id)) is not None:
-        notifier.send(tg, "💸 Вам проведена выплата:\n" + card)
+        notifier.send(tg, await _paid_text(session, p))
 
 
 @router.message(Command("payouts"))
@@ -201,7 +201,7 @@ async def payout_confirm(callback: CallbackQuery, session, actor, settings, noti
     card = await ui.payout_card(session, p)
     notifier.edit(callback.message, card)
     if changed and (tg := await _employee_tg(session, p.employee_id)) is not None:
-        notifier.send(tg, "💸 Вам проведена выплата:\n" + card)
+        notifier.send(tg, await _paid_text(session, p))
 
 
 @router.message(Command("payout_cancel"))
@@ -238,18 +238,50 @@ async def request_action(callback: CallbackQuery, session, actor, settings, noti
         notifier.toast(callback, "Запрос отменён")
         notifier.edit(callback.message, await ui.request_card(session, req))
         return
+    before = await session.get(PayoutRequest, int(req_id))
+    already = before is not None and before.status != "requested"
     req, p = await payroll.decide_request(session, actor, settings, int(req_id), action == "a")
     if p is not None:
         await payroll.confirm_if_allowed(session, actor, settings, p)
-    notifier.toast(callback, "Одобрено" if req.status == "approved" else "Отклонено")
+    if already:
+        notifier.toast(callback, "Уже решено")
+    elif p is None:
+        notifier.toast(callback, "Отклонено")
+    else:
+        notifier.toast(callback, "Аванс записан" if p.status == "confirmed" else "Одобрено, ждёт владельца")
     text = await ui.request_card(session, req)
     markup = None
     if p is not None:
         text += "\n\n" + await ui.payout_card(session, p)
         markup = ui.payout_kb(p)
     notifier.edit(callback.message, text, markup)
-    if (tg := await _employee_tg(session, req.employee_id)) is not None:
-        notifier.send(tg, "Решение по вашему запросу:\n" + await ui.request_card(session, req))
+    if already:
+        return
+    tg = await _employee_tg(session, req.employee_id)
+    if p is None:
+        if tg is not None:
+            notifier.send(tg, "❌ Просьба об авансе отклонена:\n" + await ui.request_card(session, req))
+        return
+    if p.status == "confirmed":
+        if tg is not None:
+            notifier.send(tg, await _paid_text(session, p))
+        return
+    # Одобрил не владелец, а выплаты подтверждает владелец: зовём его, сотруднику говорим, что ждём.
+    card = await ui.payout_card(session, p)
+    owner_only = settings.payout_confirm_owner_only
+    for user in await access.deciders(session, Perm.PAYROLL_PAYOUT_CONFIRM, p.department_id, owner_only):
+        if user.id != actor.user.id:
+            notifier.send(user.telegram_id, "Аванс одобрен, ждёт вашего подтверждения:\n" + card, ui.payout_kb(p))
+    if tg is not None:
+        notifier.send(tg, "✅ Просьба об авансе одобрена, ждёт подтверждения владельца.\n" + card)
+
+
+async def _paid_text(session, p) -> str:
+    card = await ui.payout_card(session, p)
+    if p.kind in payroll.ADVANCE_KINDS:
+        amount = await ui.money(session, p.amount, p.currency)
+        return f"💵 Аванс {amount} выдан. Он вычтется из зарплаты.\n\n" + card
+    return "💸 Вам проведена выплата:\n" + card
 
 
 # ------------------------------------------------------------------ расчёт и периоды

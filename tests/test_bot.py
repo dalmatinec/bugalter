@@ -19,7 +19,7 @@ from bugalter.db.models import Adjustment, Department, Employee, Payout, StockDo
 from bugalter.services import access, ledger, org, payroll, stock, tariffs, work
 from bugalter.services.settings import get_settings
 
-OWNER, IVAN, OPERATOR = 1, 10, 30
+OWNER, IVAN, OPERATOR, ACCOUNTANT = 1, 10, 30, 40
 GROUP = -100777
 
 
@@ -289,7 +289,7 @@ async def test_money_flow_private_only(h, session):
     assert "ожидает подтверждения" in out
     payout = (await session.execute(select(Payout))).scalar_one()
     out = await h.press(OWNER, f"po:c:{payout.id}")
-    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "выплата" in c.text for c in out)
+    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "Аванс $1\u202f000,00 выдан" in c.text for c in out)
     assert (await ledger.balances(session, entry.employee_id)) == {"USD": Decimal("1500.0000")}
 
     # запрос выплаты от сотрудника
@@ -586,3 +586,59 @@ async def test_backups_screen(h, session, tmp_path):
         task.cancel()
     await h.press(IVAN, "p:bk")
     assert any("только владельцу" in a for a in h.tg.alerts())
+
+
+async def test_advance_request_owner_approves(h, session):
+    """Сотрудник просит аванс, владелец одобряет кнопкой, бот сразу записывает аванс."""
+    dept, emp = await setup_company(h, session)
+    await h.say(IVAN, "💸 Попросить аванс")
+    out = await h.say(IVAN, "300000 на ремонт")
+    assert "Просьба отправлена" in texts(out)
+    ask = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == OWNER)
+    assert "просит аванс" in ask.text
+    # Оператор без права на выплаты просьбу не получает
+    assert not any(isinstance(c, SendMessage) and c.chat_id == OPERATOR for c in out)
+    approve = ask.reply_markup.inline_keyboard[0][0].callback_data
+
+    out = await h.press(OWNER, approve)
+    note = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == IVAN)
+    assert "Аванс $300 000,00 выдан" in note.text and "вычтется из зарплаты" in note.text
+    assert await payroll.outstanding_advance(session, emp.id, "USD") == Decimal(300000)
+    # Повторное нажатие ничего не записывает и не шлёт
+    out = await h.press(OWNER, approve)
+    assert not any(isinstance(c, SendMessage) for c in out)
+    assert (await session.execute(select(func.count()).select_from(Payout))).scalar_one() == 1
+
+
+async def test_advance_request_accountant_then_owner(h, session):
+    """Бухгалтер одобрил, но выплаты подтверждает владелец: владельцу приходит кнопка подтверждения."""
+    dept, emp = await setup_company(h, session)
+    owner = await access.load_actor(session, OWNER)
+    await h.say(ACCOUNTANT, "/start")
+    acc_user = await access.find_user(session, str(ACCOUNTANT))
+    await access.grant_role(session, owner, acc_user, "accountant", dept)
+    await session.commit()
+
+    out = await h.say(ACCOUNTANT, "⚙️ Управление")
+    assert "Выплаты" in texts(out) and "Сотрудники" not in texts(out)
+
+    await h.say(IVAN, "💸 Попросить аванс")
+    out = await h.say(IVAN, "500")
+    ask = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == OWNER)
+    out = await h.press(ACCOUNTANT, ask.reply_markup.inline_keyboard[0][0].callback_data)
+    to_owner = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == OWNER)
+    assert "ждёт вашего подтверждения" in to_owner.text
+    to_ivan = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == IVAN)
+    assert "ждёт подтверждения владельца" in to_ivan.text
+    assert await payroll.outstanding_advance(session, emp.id, "USD") == 0
+
+    out = await h.press(OWNER, to_owner.reply_markup.inline_keyboard[0][0].callback_data)
+    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "Аванс $500,00 выдан" in c.text for c in out)
+    assert await payroll.outstanding_advance(session, emp.id, "USD") == Decimal(500)
+
+    # Отказ: сотруднику приходит понятное сообщение
+    await h.say(IVAN, "💸 Попросить аванс")
+    out = await h.say(IVAN, "100")
+    ask = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == OWNER)
+    out = await h.press(OWNER, ask.reply_markup.inline_keyboard[0][1].callback_data)
+    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "отклонена" in c.text for c in out)

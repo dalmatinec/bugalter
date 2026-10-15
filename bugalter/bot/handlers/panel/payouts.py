@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
 from ....db.models import Employee, User
-from ....domain.errors import NotFound
+from ....domain.errors import AccessDenied, NotFound
 from ....domain.money import currency_label, fmt_money, parse_decimal
 from ....domain.permissions import Perm
 from ....services import access, org, payroll
@@ -89,6 +89,8 @@ async def _finish(session, actor, settings, notifier, payout, employee: Employee
 
 @router.callback_query(F.data == "p:pay")
 async def payouts(callback: CallbackQuery, state: FSMContext, session, actor, settings, notifier):
+    if not (actor.is_owner or actor.can_anywhere(Perm.PAYROLL_PAYOUT)):
+        raise AccessDenied("Выплаты доступны владельцу, бухгалтеру и руководителю")
     await state.clear()
     show(callback, notifier, *await payouts_view(session, settings, actor))
 
