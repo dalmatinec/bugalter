@@ -38,6 +38,9 @@ async def create_work_type(
     await reference.get_unit(session, unit_code)
     if (await session.execute(select(WorkType.id).where(WorkType.code == code))).first():
         raise ValidationError(f"Вид работ {code} уже есть")
+    tag = work_tag(name or code)
+    if tag in await work_types_by_tag(session):
+        raise ValidationError(f"Работа с тегом #{tag} уже есть, назовите эту иначе")
     wt = WorkType(
         code=code, name=name.strip() or code, unit_code=unit_code, calc_method=calc_method, created_by=actor.user.id
     )
@@ -130,6 +133,16 @@ async def work_types_for_department(session: AsyncSession, department_id: int) -
 
 async def list_work_types(session: AsyncSession) -> list[WorkType]:
     return list((await session.execute(select(WorkType).order_by(WorkType.is_active.desc(), WorkType.code))).scalars())
+
+
+def work_tag(name: str) -> str:
+    """Тег работы для отчёта в группе: название без пробелов и знаков. «Фасовка 0,5» → фасовка05."""
+    return "".join(ch for ch in name.lower().replace("ё", "е") if ch.isalnum())
+
+
+async def work_types_by_tag(session: AsyncSession) -> dict[str, WorkType]:
+    types = (await session.execute(select(WorkType).where(WorkType.is_active))).scalars()
+    return {work_tag(wt.name): wt for wt in types if work_tag(wt.name)}
 
 
 async def create_tariffs(

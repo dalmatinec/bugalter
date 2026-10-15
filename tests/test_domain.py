@@ -95,3 +95,13 @@ def test_owner_ids_reject_garbage(monkeypatch):
     monkeypatch.setenv("OWNER_TELEGRAM_IDS", "@ivan")
     with pytest.raises(PydanticValidationError):
         Config()
+
+
+def test_parse_tag_report():
+    from bugalter.domain.tags import parse_tag_report
+    from bugalter.services.tariffs import work_tag
+
+    report = parse_tag_report("#фасовка05 20 #доставка1 х3 #доставка вчера у клиента")
+    assert [(i.tag, i.qty) for i in report.items] == [("фасовка05", "20"), ("доставка1", "3"), ("доставка", "1")]
+    assert report.date_token == "вчера" and report.comment == "у клиента"
+    assert work_tag("Фасовка 0,5") == "фасовка05" and work_tag("Доставка") == "доставка"

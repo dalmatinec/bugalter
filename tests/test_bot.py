@@ -451,7 +451,7 @@ async def test_admin_panel_simple_setup(h, session):
     assert tariff.currency == "USD" and tariff.employee_id is None
     assert (await session.execute(select(TariffTier))).scalar_one().threshold == Decimal(10)
     out = texts(await h.press(OWNER, "p:w"))
-    assert "Доставка</b>: $400 за заказ" in out
+    assert "Доставка</b> #доставка: $400 за заказ" in out
 
     # Фиксированная оплата: без вопроса про единицы
     await h.press(OWNER, "p:w:add")
@@ -480,7 +480,7 @@ async def test_admin_panel_simple_setup(h, session):
     await h.dp.feed_update(h.bot, Update(update_id=next(h.ids), my_chat_member=event))
     assert "Чья это группа?" in texts(h.tg.calls[mark:])
     out = texts(await h.press(OWNER, f"g:e:{dept.id}:{emp.id}", GROUP))
-    assert "группа сотрудника" in out
+    assert "Это группа: <b>Курьер</b>" in out and "администратором" in out
     assert (await session.get(TelegramChat, GROUP)).employee_id == emp.id
 
     # Оператор Иван вносит работу в своей группе без кода сотрудника
@@ -492,3 +492,33 @@ async def test_admin_panel_simple_setup(h, session):
     await h.say(OWNER, "Кофе зерно")
     out = texts(await h.press(OWNER, "p:pr:u:кг"))
     assert "Кофе зерно" in out
+
+
+async def test_tag_report_in_group(h, session):
+    """Сотрудник пишет отчёт тегами, владелец подтверждает одной кнопкой."""
+    await setup_company(h, session)
+    # Чужие хэштеги — не отчёт, бот молчит
+    assert texts(await h.say(IVAN, "#привет всем", GROUP)) == ""
+
+    out = await h.say(IVAN, "#доставка 3 #фасовка 2,5 #непонятно", GROUP)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
+    assert "Отчёт: Иван Иванов" in card.text and "Доставка × 3 заказ" in card.text
+    assert "#непонятно" in card.text and "$" not in card.text  # суммы в группе скрыты
+    entries = (await session.execute(select(WorkEntry).order_by(WorkEntry.id))).scalars().all()
+    assert [(e.status, e.quantity) for e in entries] == [("pending", Decimal(3)), ("pending", Decimal("2.5"))]
+    confirm = card.reply_markup.inline_keyboard[0][0].callback_data
+    assert confirm.startswith(f"tb:c:{GROUP}:")
+
+    # Сотрудник сам себе не подтверждает
+    await h.press(IVAN, confirm, GROUP)
+    assert any("Недостаточно прав" in a for a in h.tg.alerts())
+    out = await h.press(OWNER, confirm, GROUP)
+    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "Отчёт подтверждён" in c.text for c in out)
+    assert await ledger.balances(session, entries[0].employee_id) == {"USD": Decimal("1230.8800")}
+
+    # Без цены отчёт не принимается целиком
+    owner = await access.load_actor(session, OWNER)
+    await tariffs.create_work_type(session, owner, "погрузка", "шт", "per_unit", "Погрузка")
+    await session.commit()
+    out = texts(await h.say(IVAN, "#погрузка 2", GROUP))
+    assert "Нет цены на Погрузка" in out

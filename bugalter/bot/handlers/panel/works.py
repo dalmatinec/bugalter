@@ -28,7 +28,12 @@ COMMON_UNITS = ("заказ", "шт", "кг", "ч", "адрес", "заявка"
 
 
 async def works_view(session, settings):
-    lines = ["💰 <b>Работы и цены</b>", "За что платим и сколько. Нажмите на работу, чтобы поменять цену.", ""]
+    lines = [
+        "💰 <b>Работы и цены</b>",
+        "За что платим и сколько. Нажмите на работу, чтобы поменять цену.",
+        "Сотрудник отчитывается в своей группе тегом и количеством: <code>#доставка 3</code>",
+        "",
+    ]
     rows = []
     today = settings.today()
     for wt in await tariffs.list_work_types(session):
@@ -39,7 +44,7 @@ async def works_view(session, settings):
             price += f" за {h(wt.unit_code)}"
         elif base and wt.calc_method == "fixed":
             price += " за раз"
-        state = "" if wt.is_active else " (выключена)"
+        state = f" #{h(tariffs.work_tag(wt.name))}" if wt.is_active else " (выключена)"
         lines.append(f"• <b>{h(wt.name)}</b>{state}: {price}")
         rows.append([(f"{wt.name}", f"p:w:v:{wt.id}")])
     if not rows:
@@ -54,10 +59,12 @@ async def work_view(session, settings, wt_id: int):
     if wt is None:
         raise NotFound("Вид работ не найден")
     today = settings.today()
+    tag = tariffs.work_tag(wt.name)
     lines = [
         f"💰 <b>{h(wt.name)}</b>",
         f"Оплата: {METHOD_TITLES[wt.calc_method]}"
         + (f", считаем в {h(wt.unit_code)}" if wt.calc_method == "per_unit" else ""),
+        f"Тег для отчёта в группе: <code>#{h(tag)} 3</code> (3 значит сколько сделано)",
     ]
     if not wt.is_active:
         lines.append("⏸ Выключена, при вводе работы не показывается")

@@ -14,7 +14,7 @@ from ..config import Config, get_config
 from ..db.session import make_engine, make_sessionmaker
 from ..logs import setup_logging
 from ..services import access, org, reference
-from .handlers import common, me, panel, payroll, reports, stock, work
+from .handlers import common, me, panel, payroll, reports, stock, tags, work
 from .middlewares import ContextMiddleware
 from .storage import PostgresStorage
 
@@ -31,6 +31,7 @@ ROUTERS = (
     common.router,
     panel.router,
     work.router,
+    tags.router,
     me.router,
     stock.router,
     payroll.router,

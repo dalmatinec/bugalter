@@ -184,12 +184,20 @@ async def create_entry(
     submit: bool = True,
     chat_id: int | None = None,
     coefficient_codes: list[str] | None = None,
+    self_report: bool = False,
 ) -> EntryResult:
-    """Создаёт операцию. Повтор с тем же idempotency_key возвращает уже созданную запись."""
+    """Создаёт операцию. Повтор с тем же idempotency_key возвращает уже созданную запись.
+
+    self_report: сотрудник сам отчитывается о своей работе (теги в группе). Права на ввод ему не нужно,
+    запись всегда уходит на подтверждение.
+    """
     existing = await _by_key(session, idempotency_key)
     if existing:
         return EntryResult(existing, False)
-    actor.require(Perm.WORK_CREATE, department_id)
+    if self_report and actor.is_self(employee_id):
+        submit = True
+    else:
+        actor.require(Perm.WORK_CREATE, department_id)
     employee = await session.get(Employee, employee_id)
     if employee is None or not employee.is_active:
         raise NotFound("Сотрудник не найден или уволен")
@@ -278,6 +286,12 @@ async def create_entry(
 
 async def _by_key(session: AsyncSession, key: str) -> WorkEntry | None:
     return (await session.execute(select(WorkEntry).where(WorkEntry.idempotency_key == key))).scalar_one_or_none()
+
+
+async def entries_by_key_prefix(session: AsyncSession, prefix: str) -> list[WorkEntry]:
+    """Все операции одного сообщения-отчёта (ключи вида tag:<чат>:<сообщение>:<строка>)."""
+    query = select(WorkEntry).where(WorkEntry.idempotency_key.startswith(prefix, autoescape=True))
+    return list((await session.execute(query.order_by(WorkEntry.id))).scalars())
 
 
 async def _locked(session: AsyncSession, entry_id: int) -> WorkEntry:
