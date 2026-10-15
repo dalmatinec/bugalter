@@ -1,4 +1,4 @@
-"""advance settlement instead of credit limits
+"""advance settlement instead of credit limits, employee deletion
 
 Аванс теперь любой суммы; при зарплате руководитель решает, вычесть его сейчас или в следующий раз.
 payouts.settled: сколько из этого аванса уже вычтено из зарплаты. Лимиты «аванса в долг» больше не нужны.
@@ -25,9 +25,12 @@ def upgrade() -> None:
     op.create_check_constraint(op.f("ck_payouts_settled_range"), "payouts", "settled >= 0 AND settled <= amount")
     op.drop_table("employee_credit_limits")
     op.execute("DELETE FROM settings WHERE key = 'default_credit_limit'")
+    # Удалённый сотрудник с историей: пропадает из списков, деньги и работа остаются в учёте.
+    op.add_column("employees", sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True))
 
 
 def downgrade() -> None:
+    op.drop_column("employees", "deleted_at")
     op.create_table(
         "employee_credit_limits",
         sa.Column("employee_id", sa.Integer(), nullable=False),

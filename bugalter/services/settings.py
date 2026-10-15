@@ -29,7 +29,7 @@ SPECS: dict[str, SettingSpec] = {
     "payroll_split_day": SettingSpec("15", "int", "Последний день первой половины месяца (периоды 1-N и N+1-конец)"),
     "group_show_amounts": SettingSpec("false", "bool", "Показывать суммы начислений в рабочих группах"),
     "confirm_owner_only": SettingSpec(
-        "true", "bool", "Работу подтверждает только владелец (если нет, то ещё и руководители)"
+        "false", "bool", "Работу подтверждает только владелец (если нет, то ещё операторы и руководители)"
     ),
     "payout_confirm_owner_only": SettingSpec(
         "true", "bool", "Выплату подтверждает только владелец (если нет, то ещё руководитель и бухгалтер)"

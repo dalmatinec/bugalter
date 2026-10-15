@@ -125,7 +125,11 @@ async def work_types_for_department(session: AsyncSession, department_id: int) -
             WorkTypeDepartment,
             and_(WorkTypeDepartment.work_type_id == WorkType.id, WorkTypeDepartment.department_id == department_id),
         )
-        .where(WorkType.is_active, or_(WorkType.all_departments, WorkTypeDepartment.department_id.isnot(None)))
+        .where(
+            WorkType.is_active,
+            WorkType.code.notin_(SYSTEM_WORK_CODES),
+            or_(WorkType.all_departments, WorkTypeDepartment.department_id.isnot(None)),
+        )
         .order_by(WorkType.name)
     )
     return list((await session.execute(query)).scalars())
@@ -135,6 +139,14 @@ async def list_work_types(session: AsyncSession) -> list[WorkType]:
     return list((await session.execute(select(WorkType).order_by(WorkType.is_active.desc(), WorkType.code))).scalars())
 
 
+# Служебные работы: не показываются в списках работ, в /op и не принимаются тегами.
+SYSTEM_WORK_CODES = frozenset({"oklad"})
+
+
+async def visible_work_types(session: AsyncSession) -> list[WorkType]:
+    return [wt for wt in await list_work_types(session) if wt.code not in SYSTEM_WORK_CODES]
+
+
 def work_tag(name: str) -> str:
     """Тег работы для отчёта в группе: название без пробелов и знаков. «Фасовка 0,5» → фасовка05."""
     return "".join(ch for ch in name.lower().replace("ё", "е") if ch.isalnum())
@@ -142,7 +154,7 @@ def work_tag(name: str) -> str:
 
 async def work_types_by_tag(session: AsyncSession) -> dict[str, WorkType]:
     types = (await session.execute(select(WorkType).where(WorkType.is_active))).scalars()
-    return {work_tag(wt.name): wt for wt in types if work_tag(wt.name)}
+    return {work_tag(wt.name): wt for wt in types if work_tag(wt.name) and wt.code not in SYSTEM_WORK_CODES}
 
 
 async def create_tariffs(

@@ -211,15 +211,16 @@ async def test_confirm_rules(world, session, settings):
     await setup_delivery_tariffs(w)
     entry = (await create(w, settings, w.ivan, w.delivery, "1", d(16))).entry
     with pytest.raises(AccessDenied):
-        await work.confirm_entry(session, w.operator, settings, entry.id)  # нет права
-    # По умолчанию подтверждает только владелец
+        await work.confirm_entry(session, w.ivan_actor, settings, entry.id)  # сотрудник: нет права
+    # Владелец оставил подтверждение только себе
+    owner_only = dataclasses.replace(settings, confirm_owner_only=True)
     with pytest.raises(AccessDenied, match="только владелец"):
-        await work.confirm_entry(session, w.manager, settings, entry.id)
+        await work.confirm_entry(session, w.manager, owner_only, entry.id)
     with pytest.raises(AccessDenied, match="только владелец"):
-        await work.reject_entry(session, w.manager, settings, entry.id, None)
+        await work.reject_entry(session, w.operator, owner_only, entry.id, None)
 
-    # Владелец разрешил руководителям в настройках
-    open_ = dataclasses.replace(settings, confirm_owner_only=False)
+    # По умолчанию подтверждают и операторы с руководителями
+    open_ = settings
     await work.confirm_entry(session, w.manager, open_, entry.id)
     # Руководитель — сам исполнитель операции
     await w.tariff(w.processing, "50", d(1), dept=w.north)

@@ -77,6 +77,8 @@ class Employee(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     created_at: Mapped[dt.datetime] = _now_col()
     dismissed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Удалён владельцем: из списков пропадает, а проведённые деньги и работа остаются (их стереть нельзя).
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class EmployeeDepartment(Base):

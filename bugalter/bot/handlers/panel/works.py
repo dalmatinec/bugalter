@@ -36,7 +36,7 @@ async def works_view(session, settings):
     ]
     rows = []
     today = settings.today()
-    for wt in await tariffs.list_work_types(session):
+    for wt in await tariffs.visible_work_types(session):
         rates = [r for r in await tariffs.current_rates(session, wt.id, today) if not r[4]]
         base = next((r for r in rates if r[1] is None and r[2] is None), rates[0] if rates else None)
         price = rate_text(base[0].rate, base[0].currency, wt.calc_method) if base else "цена не задана ⚠️"

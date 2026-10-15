@@ -354,7 +354,7 @@ async def submit_entry(session: AsyncSession, actor, entry_id: int) -> tuple[Wor
     return entry, True
 
 
-OWNER_ONLY_CONFIRM = "Подтверждает только владелец. Разрешить руководителям: Управление, Ещё, Настройки"
+OWNER_ONLY_CONFIRM = "Подтверждает только владелец. Разрешить операторам: Управление, Ещё, Настройки"
 
 
 def _check_decider(actor, entry: WorkEntry, settings: Settings) -> None:

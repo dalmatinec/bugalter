@@ -676,11 +676,18 @@ class SalaryPreview:
         return self.advance - self.deducted_now
 
 
-async def salary_preview(session: AsyncSession, employee_id: int, currency: str) -> SalaryPreview:
+async def salary_preview(
+    session: AsyncSession, settings: Settings, employee: Employee, currency: str | None = None
+) -> SalaryPreview:
+    """Сколько сотруднику должны и сколько аванса не вычтено. Сначала доначисляет оклад, если он есть."""
+    from .fixed_salary import accrue
+
+    await accrue(session, settings, employee)
+    code = (currency or settings.currency).upper()
     return SalaryPreview(
-        currency=currency,
-        balance=await ledger.available(session, employee_id, currency),
-        advance=await outstanding_advance(session, employee_id, currency),
+        currency=code,
+        balance=await ledger.available(session, employee.id, code),
+        advance=await outstanding_advance(session, employee.id, code),
     )
 
 
@@ -727,7 +734,7 @@ async def pay_salary(
     department_id = await _department_for(session, employee.id, None)
     actor.require(Perm.PAYROLL_PAYOUT, department_id)
     await session.execute(select(Employee.id).where(Employee.id == employee.id).with_for_update())
-    preview = await salary_preview(session, employee.id, currency_code)
+    preview = await salary_preview(session, settings, employee, currency_code)
     if preview.earned <= 0:
         raise ValidationError("Выплачивать нечего: всё заработанное уже выдано")
     deducted = preview.deducted_now if deduct_advance else Decimal(0)
@@ -892,6 +899,9 @@ async def close_period(
     session: AsyncSession, actor, settings: Settings, period_id: int, force: bool = False
 ) -> tuple[PayrollPeriod, list[PeriodStatement]]:
     actor.require(Perm.PERIOD_CLOSE)
+    from .fixed_salary import accrue_all
+
+    await accrue_all(session, settings)  # оклад за прошедшие дни зарплаты должен попасть в итоги
     period = await session.get(PayrollPeriod, period_id, with_for_update=True, populate_existing=True)
     if period is None:
         raise NotFound(f"Период #{period_id} не найден")

@@ -35,7 +35,7 @@ async def payouts_view(session, settings, actor):
     for emp, _ in await org.list_employees(session):
         if not emp.is_active:
             continue
-        pv = await payroll.salary_preview(session, emp.id, cur)
+        pv = await payroll.salary_preview(session, settings, emp)
         line = f"• <b>{h(emp.full_name)}</b>: заработано {fmt_money(pv.earned, cur)}"
         if pv.advance:
             line += f", аванс {fmt_money(pv.advance, cur)}"
@@ -52,7 +52,7 @@ async def employee_pay_view(session, settings, emp_id: int):
     if emp is None:
         raise NotFound("Сотрудник не найден")
     cur = settings.currency
-    pv = await payroll.salary_preview(session, emp.id, cur)
+    pv = await payroll.salary_preview(session, settings, emp)
     lines = [f"💸 <b>{h(emp.full_name)}</b>", f"💰 Заработано, зарплатой не выплачено: {fmt_money(pv.earned, cur)}"]
     rows = [[("💵 Выдать аванс", f"p:pay:adv:{emp.id}")]]
     if pv.advance:
@@ -145,7 +145,7 @@ async def salary_confirm(callback: CallbackQuery, session, settings, notifier):
     _, _, _, emp_id, deduct = callback.data.split(":")
     emp = await session.get(Employee, int(emp_id))
     cur = settings.currency
-    pv = await payroll.salary_preview(session, emp.id, cur)
+    pv = await payroll.salary_preview(session, settings, emp)
     if deduct == "1":
         amount = pv.with_deduction
         what = f"вычесть аванс {fmt_money(pv.deducted_now, cur)} и выплатить {fmt_money(amount, cur)}"

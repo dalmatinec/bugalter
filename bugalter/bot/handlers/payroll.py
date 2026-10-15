@@ -12,7 +12,7 @@ from ...domain.dates import parse_range
 from ...domain.errors import AccessDenied, ValidationError
 from ...domain.money import fmt_money, parse_decimal
 from ...domain.permissions import Perm
-from ...services import access, ledger, org, payroll, reference
+from ...services import access, fixed_salary, ledger, org, payroll, reference
 from .. import ui
 from ..args import extract, need, parse_id, tokens
 from ..ui import h
@@ -256,6 +256,7 @@ async def request_action(callback: CallbackQuery, session, actor, settings, noti
 
 
 async def _statement_for(session, settings, employee, arg: str | None):
+    await fixed_salary.accrue(session, settings, employee)
     today = settings.today()
     if not arg or arg in ("текущий", "current"):
         period = await ledger.period_for_date(session, today, settings)

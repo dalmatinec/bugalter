@@ -81,3 +81,55 @@ async def test_employee_membership_and_chat_binding(world, session):
         await org.bind_chat(session, w.manager, -100600, "Юг", w.south)
     await org.detach_from_department(session, w.owner, w.ivan, w.south)
     assert await org.employee_department_ids(session, w.ivan.id) == [w.north.id]
+
+
+async def test_delete_employee(world, session, settings):
+    import datetime as dt
+    from decimal import Decimal
+
+    from bugalter.db.models import Employee
+    from bugalter.services import tariffs, work
+
+    w = world
+    # Без истории — стирается полностью
+    temp = await org.create_employee_by_title(session, w.owner, "Стажёр")
+    await org.attach_to_department(session, w.owner, temp, w.north)
+    with pytest.raises(ValidationError, match="уволите"):
+        await org.delete_employee(session, w.owner, temp)
+    await org.set_employee_active(session, w.owner, temp, False)
+    with pytest.raises(AccessDenied):
+        await org.delete_employee(session, w.admin, temp)
+    assert await org.delete_employee(session, w.owner, temp) is True
+    assert await session.get(Employee, temp.id) is None
+
+    # С историей — пропадает из списков, Telegram отвязан, суммы остаются
+    await tariffs.create_tariffs(
+        session,
+        w.owner,
+        settings,
+        work_type=w.delivery,
+        rate=Decimal(100),
+        currency="USD",
+        department=w.north,
+        employees=None,
+        valid_from=dt.date(2026, 10, 1),
+    )
+    entry = (
+        await work.create_entry(
+            session,
+            w.operator,
+            settings,
+            idempotency_key="del-1",
+            department_id=w.north.id,
+            employee_id=w.ivan.id,
+            work_type_id=w.delivery.id,
+            quantity=Decimal(1),
+        )
+    ).entry
+    await work.confirm_entry(session, w.owner, settings, entry.id)
+    await org.set_employee_active(session, w.owner, w.ivan, False)
+    assert await org.delete_employee(session, w.owner, w.ivan) is False
+    assert w.ivan.user_id is None and w.ivan.deleted_at is not None
+    assert w.ivan.id not in {e.id for e, _ in await org.list_employees(session)}
+    ivan = await w.reload(w.ivan_actor)
+    assert ivan.employee is None and not ivan.grants

@@ -201,8 +201,8 @@ async def test_full_operation_flow(h, session):
     count = (await session.execute(select(func.count()).select_from(WorkEntry))).scalar_one()
     assert count == 2
 
-    # Оператор не может подтвердить
-    await h.press(OPERATOR, f"w:c:{entry.id}", GROUP)
+    # Сотрудник не может подтвердить
+    await h.press(IVAN, f"w:c:{entry.id}", GROUP)
     assert any("Недостаточно прав" in a for a in h.tg.alerts())
 
     # Владелец подтверждает дважды — начисление одно, Ивану уходит уведомление в личку

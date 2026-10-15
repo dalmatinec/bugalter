@@ -142,7 +142,7 @@ async def request_payout_cmd(message: Message, command: CommandObject, session, 
 @router.message(F.text == ui.BTN_REQUEST)
 async def request_payout_button(message: Message, state: FSMContext, session, actor, settings, notifier, is_private):
     emp = _me(actor, is_private)
-    preview = await payroll.salary_preview(session, emp.id, settings.currency)
+    preview = await payroll.salary_preview(session, settings, emp)
     lines = [f"💰 Заработано, ещё не выплачено: {await ui.money(session, preview.earned, settings.currency)}"]
     if preview.advance:
         lines.append(f"💵 Аванс уже взят, не вычтен: {await ui.money(session, preview.advance, settings.currency)}")

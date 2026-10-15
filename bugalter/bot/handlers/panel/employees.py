@@ -10,9 +10,9 @@ from sqlalchemy import select
 
 from ....db.models import Department, Employee, Tariff, User, WorkType
 from ....domain.errors import DomainError, NotFound
-from ....domain.money import fmt_money
+from ....domain.money import currency_label, fmt_money, parse_decimal
 from ....domain.permissions import Perm
-from ....services import access, org, payroll, tariffs
+from ....services import access, fixed_salary, org, payroll, tariffs
 from ... import ui
 from ...ui import h
 from .base import PAGE, ROLES_HELP, ask, can_admin, cancel_kb, form, kb, rate_text, role_choice, role_names, show
@@ -22,7 +22,7 @@ router = Router(name="panel.employees")
 
 WHO = {
     "none": ("👷 Работник", "видит в личке свою работу, зарплату, может попросить аванс"),
-    "operator": ("📝 Оператор", "ещё вносит работу и склад в рабочих группах"),
+    "operator": ("📝 Оператор", "ещё подтверждает отчёты сотрудников в группах, вносит работу и склад"),
     "manager": ("👔 Руководитель", "ещё ставки, премии, штрафы и выплаты"),
 }
 
@@ -62,8 +62,8 @@ async def employees_view(session, page: int, actor):
 
 async def employee_view(session, settings, emp_id: int, actor):
     emp = await session.get(Employee, emp_id)
-    if emp is None:
-        raise NotFound("Сотрудник не найден")
+    if emp is None or emp.deleted_at is not None:
+        raise NotFound("Сотрудник удалён")
     lines = [f"👤 <b>{h(emp.full_name)}</b>"]
     if not emp.is_active:
         lines.append("🚫 Уволен (история сохранена)")
@@ -85,7 +85,10 @@ async def employee_view(session, settings, emp_id: int, actor):
             lines.append("🔑 Работник: видит свою работу и зарплату")
     else:
         lines.append("⏳ Ещё не подключился, отправьте ему ссылку (кнопка ниже)")
-    preview = await payroll.salary_preview(session, emp.id, settings.currency)
+    oklad = await fixed_salary.monthly(session, settings, emp)
+    if oklad is not None:
+        lines.append(f"💼 Оклад: {fmt_money(oklad.rate, oklad.currency)} в месяц")
+    preview = await payroll.salary_preview(session, settings, emp)
     if preview.earned or preview.advance:
         lines.append(f"💰 Заработано, не выплачено: {fmt_money(preview.earned, settings.currency)}")
     if preview.advance:
@@ -97,7 +100,7 @@ async def employee_view(session, settings, emp_id: int, actor):
         await session.execute(
             select(Tariff, WorkType)
             .join(WorkType, WorkType.id == Tariff.work_type_id)
-            .where(Tariff.employee_id == emp.id)
+            .where(Tariff.employee_id == emp.id, WorkType.code != fixed_salary.CODE)
             .order_by(Tariff.valid_from.desc(), Tariff.id.desc())
         )
     ).all()
@@ -117,9 +120,14 @@ async def employee_view(session, settings, emp_id: int, actor):
     else:
         rows.append([("🔑 Роль", f"p:e:role:{emp.id}"), ("✏️ Должность", f"p:e:pos:{emp.id}")])
     rows.append([("💸 Выплаты", f"p:pay:v:{emp.id}"), ("💰 Своя цена", f"p:e:rate:{emp.id}")])
+    rows.append([("💼 Оклад", f"p:e:okl:{emp.id}")])
     if len(await org.active_departments(session)) > 1:
         rows.append([("🏢 + Филиал", f"p:e:ad:{emp.id}"), ("🏢 − Филиал", f"p:e:rd:{emp.id}")])
-    rows.append([("🚫 Уволить", f"p:e:off:{emp.id}") if emp.is_active else ("♻️ Вернуть", f"p:e:on:{emp.id}")])
+    if emp.is_active:
+        rows.append([("🚫 Уволить", f"p:e:off:{emp.id}")])
+    else:
+        back = [("♻️ Вернуть", f"p:e:on:{emp.id}")]
+        rows.append([*back, ("🗑 Удалить", f"p:e:del:{emp.id}")] if actor.is_owner else back)
     rows.append([("⬅️ Сотрудники", "p:e")])
     return "\n".join(lines), kb(rows)
 
@@ -250,6 +258,58 @@ async def employee_active(callback: CallbackQuery, session, actor, settings, not
     show(callback, notifier, *await employee_view(session, settings, emp.id, actor))
 
 
+@router.callback_query(F.data.startswith("p:e:okl:"))
+async def employee_oklad(callback: CallbackQuery, state: FSMContext, session, settings, notifier):
+    emp = await session.get(Employee, int(callback.data.split(":")[3]))
+    await ask(state, "emp_oklad", emp_id=emp.id)
+    day = settings.payroll_split_day
+    show(
+        callback,
+        notifier,
+        f"💼 <b>Оклад: {h(emp.full_name)}</b>\n"
+        f"Фиксированная зарплата в месяц, в {currency_label(settings.currency)}. "
+        f"Половина начисляется {day}-го, половина в последний день месяца, сама.\n"
+        "Премии, штрафы и авансы работают как обычно. "
+        "Если человек ещё и делает работу по тегам, она добавится сверху.\n\n"
+        "Напишите сумму в месяц, например <b>300000</b>. 0 убирает оклад.",
+        cancel_kb(f"p:e:v:{emp.id}"),
+    )
+
+
+@form("emp_oklad")
+async def form_emp_oklad(message, state, session, actor, settings, notifier, data, **_):
+    emp = await session.get(Employee, data["emp_id"])
+    amount = parse_decimal(message.text, allow_zero=True, max_scale=2, what="сумму")
+    await fixed_salary.set_monthly(session, actor, settings, emp, amount)
+    await state.clear()
+    await session.flush()
+    notifier.answer(message, *await employee_view(session, settings, emp.id, actor))
+
+
+@router.callback_query(F.data.startswith("p:e:del:"))
+async def employee_delete_ask(callback: CallbackQuery, session, notifier):
+    emp = await session.get(Employee, int(callback.data.split(":")[3]))
+    show(
+        callback,
+        notifier,
+        f"🗑 Удалить <b>{h(emp.full_name)}</b>?\n\n"
+        "Он пропадёт из всех списков, его Telegram отвяжется, бот перестанет ему отвечать. "
+        "Если по нему уже были работа, выплаты или товар, эти суммы останутся в отчётах: "
+        "стереть проведённые деньги нельзя, это защита учёта.",
+        kb([[("🗑 Да, удалить", f"p:e:dely:{emp.id}"), ("✖️ Нет", f"p:e:v:{emp.id}")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("p:e:dely:"))
+async def employee_delete(callback: CallbackQuery, session, actor, notifier):
+    emp = await session.get(Employee, int(callback.data.split(":")[3]))
+    name = emp.full_name
+    full = await org.delete_employee(session, actor, emp)
+    note = "стёрт полностью" if full else "удалён из списков, суммы остались в отчётах"
+    text, markup = await employees_view(session, 0, actor)
+    show(callback, notifier, f"🗑 {h(name)}: {note}.\n\n{text}", markup)
+
+
 @router.callback_query(F.data.startswith("p:e:pos:"))
 async def employee_title(callback: CallbackQuery, state: FSMContext, session, notifier):
     emp = await session.get(Employee, int(callback.data.split(":")[3]))
@@ -285,9 +345,8 @@ async def employee_role(callback: CallbackQuery, session, notifier):
 @router.callback_query(F.data.startswith("p:e:rate:"))
 async def employee_rate(callback: CallbackQuery, session, notifier):
     emp_id = int(callback.data.split(":")[3])
-    rows = [
-        [(f"🛠 {wt.name}", f"p:w:x:{wt.id}:{emp_id}")] for wt in await tariffs.list_work_types(session) if wt.is_active
-    ]
+    works = [wt for wt in await tariffs.visible_work_types(session) if wt.is_active]
+    rows = [[(f"🛠 {wt.name}", f"p:w:x:{wt.id}:{emp_id}")] for wt in works]
     if not rows:
         rows.append([("➕ Добавить работу", "p:w:add")])
     rows.append([("⬅️ Назад", f"p:e:v:{emp_id}")])

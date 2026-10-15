@@ -255,7 +255,7 @@ async def test_advance_any_amount_and_deduction_at_payday(world, session, settin
         return (p.amount if p else None), deducted
 
     async def preview():
-        pv = await payroll.salary_preview(session, w.petr.id, "USD")
+        pv = await payroll.salary_preview(session, settings, w.petr, "USD")
         return pv.earned, pv.advance, pv.with_deduction
 
     await pay("advance", "300")  # срочно нужны деньги: больше, чем заработал
@@ -400,3 +400,33 @@ async def test_receipt_cost_requires_currency_and_batches_are_append_only(world,
     with pytest.raises(DBAPIError, match="только добавлением"):
         await session.execute(text("UPDATE batches SET unit_cost = 1, currency = 'USD'"))
     await session.rollback()
+
+
+async def test_fixed_monthly_salary(world, session, settings):
+    """Оклад: половина в каждый день зарплаты, сама; вместе с авансом и вычетом."""
+    from bugalter.services import fixed_salary
+
+    w = world
+    await fixed_salary.set_monthly(session, w.owner, settings, w.petr, D(300))
+    assert (await fixed_salary.monthly(session, settings, w.petr)).rate == D(300)
+    # 26.10: день зарплаты 31.10 ещё не наступил
+    assert (await payroll.salary_preview(session, settings, w.petr)).earned == 0
+    payday = dataclasses.replace(settings, today_override=d(31))
+    assert (await payroll.salary_preview(session, payday, w.petr)).earned == D(150)
+    assert await fixed_salary.accrue(session, payday, w.petr) == 0  # повтор ничего не начисляет
+    st = await payroll.build_statement(session, w.petr, date_from=d(16), date_to=d(31))
+    assert [(line.title, line.amount) for line in st.currencies["USD"].work_lines] == [("Оклад", D(150))]
+    # аванс 100 и зарплата с вычетом
+    adv, _ = await payroll.register_payout(
+        session, w.owner, payday, employee=w.petr, amount=D(100), currency="USD", kind="advance", idempotency_key=key()
+    )
+    await payroll.confirm_payout(session, w.owner, payday, adv.id)
+    payout, deducted = await payroll.pay_salary(
+        session, w.owner, payday, employee=w.petr, deduct_advance=True, idempotency_key=key()
+    )
+    assert payout.amount == D(50) and deducted == D(100)
+    # 15.11: ещё половина
+    nov = dataclasses.replace(settings, today_override=dt.date(2026, 11, 15))
+    assert await fixed_salary.accrue(session, nov, w.petr) == 1
+    # служебная работа не видна в тегах и списке работ
+    assert "оклад" not in await tariffs.work_types_by_tag(session)

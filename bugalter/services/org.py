@@ -4,12 +4,12 @@ import datetime as dt
 import re
 import secrets
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import Department, Employee, EmployeeDepartment, EmployeeInvite, TelegramChat, User
-from ..domain.errors import NotFound, ValidationError
+from ..domain.errors import AccessDenied, NotFound, ValidationError
 from ..domain.permissions import Perm
 from .audit import audit
 
@@ -159,6 +159,76 @@ async def set_employee_active(session: AsyncSession, actor, employee: Employee, 
     await audit(session, actor.user.id, "org.employee_active", "employee", employee.id, {"active": active})
 
 
+async def _has_history(session: AsyncSession, employee_id: int) -> bool:
+    from ..db.models import (
+        Adjustment,
+        LedgerEntry,
+        Location,
+        Payout,
+        PayoutRequest,
+        PeriodStatement,
+        StockDocument,
+        Tariff,
+        WorkEntry,
+    )
+
+    checks = [
+        select(WorkEntry.id).where(WorkEntry.employee_id == employee_id),
+        select(LedgerEntry.id).where(LedgerEntry.employee_id == employee_id),
+        select(Payout.id).where(Payout.employee_id == employee_id),
+        select(PayoutRequest.id).where(PayoutRequest.employee_id == employee_id),
+        select(Adjustment.id).where(Adjustment.employee_id == employee_id),
+        select(PeriodStatement.id).where(PeriodStatement.employee_id == employee_id),
+        select(Tariff.id).where(Tariff.employee_id == employee_id),
+        select(Location.id).where(Location.employee_id == employee_id),
+        select(StockDocument.id).where(
+            (StockDocument.employee_id == employee_id) | (StockDocument.target_employee_id == employee_id)
+        ),
+    ]
+    for query in checks:
+        if (await session.execute(query.limit(1))).first():
+            return True
+    return False
+
+
+async def delete_employee(session: AsyncSession, actor, employee: Employee) -> bool:
+    """Удаляет уволенного сотрудника. Возвращает True, если стёрт полностью.
+
+    Если по нему уже была работа, выплаты или товар, эти записи защищены от удаления (иначе можно было бы
+    спрятать выплату). Тогда сотрудник пропадает из всех списков, его Telegram отвязывается, а цифры
+    остаются в отчётах.
+    """
+    from ..db.models import AccessGrant
+
+    if not actor.is_owner:
+        raise AccessDenied("Удалить сотрудника может только владелец")
+    if employee.is_active:
+        raise ValidationError("Сначала уволите сотрудника, потом его можно удалить")
+    if employee.user_id:
+        await session.execute(
+            update(AccessGrant)
+            .where(AccessGrant.user_id == employee.user_id, AccessGrant.revoked_at.is_(None))
+            .values(revoked_at=func.now(), revoked_by=actor.user.id)
+        )
+    await session.execute(
+        update(TelegramChat).where(TelegramChat.employee_id == employee.id).values(employee_id=None, is_active=False)
+    )
+    await session.execute(delete(EmployeeInvite).where(EmployeeInvite.employee_id == employee.id))
+    full = not await _has_history(session, employee.id)
+    if full:
+        await session.execute(delete(EmployeeDepartment).where(EmployeeDepartment.employee_id == employee.id))
+        await audit(
+            session, actor.user.id, "org.employee_delete", "employee", employee.id, {"name": employee.full_name}
+        )
+        await session.delete(employee)
+    else:
+        employee.user_id = None
+        employee.deleted_at = dt.datetime.now(dt.UTC)
+        await audit(session, actor.user.id, "org.employee_hide", "employee", employee.id, {"name": employee.full_name})
+    await session.flush()
+    return full
+
+
 async def free_title(session: AsyncSession, title: str, exclude_id: int | None = None) -> str:
     """Должность как подпись сотрудника должна различаться: второй «Курьер» становится «Курьер 2»."""
     title = " ".join(title.split())
@@ -237,7 +307,8 @@ async def department_employees(session: AsyncSession, department_id: int) -> lis
 
 
 async def list_employees(session: AsyncSession) -> list[tuple[Employee, list[str]]]:
-    employees = list((await session.execute(select(Employee).order_by(Employee.code))).scalars())
+    query = select(Employee).where(Employee.deleted_at.is_(None)).order_by(Employee.code)
+    employees = list((await session.execute(query)).scalars())
     links = (
         await session.execute(
             select(EmployeeDepartment.employee_id, Department.code)

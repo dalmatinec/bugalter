@@ -93,6 +93,7 @@ DEFAULT_ROLES: dict[str, tuple[str, frozenset[str]]] = {
         frozenset(
             {
                 Perm.WORK_CREATE,
+                Perm.WORK_CONFIRM,
                 Perm.WORK_VIEW,
                 Perm.STOCK_OPERATE,
                 Perm.STOCK_RECEIPT_CONFIRM,
