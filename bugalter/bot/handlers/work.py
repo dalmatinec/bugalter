@@ -37,12 +37,13 @@ def _show_amounts(settings, is_private: bool) -> bool:
     return is_private or settings.group_show_amounts
 
 
-async def _notify_confirmers(session, notifier, entry: WorkEntry, actor, chat_id: int | None):
-    """Если операцию ввели в личке, сообщаем руководителям; в группе карточка с кнопками уже видна."""
+async def _notify_confirmers(session, notifier, settings, entry: WorkEntry, actor, chat_id: int | None):
+    """Если операцию ввели в личке, сообщаем тем, кто подтверждает; в группе карточка с кнопками уже видна."""
     if chat_id is not None:
         return
     text = await ui.entry_card(session, entry, show_amount=True)
-    for user in await access.users_with_perm(session, Perm.WORK_CONFIRM, entry.department_id):
+    deciders = await access.deciders(session, Perm.WORK_CONFIRM, entry.department_id, settings.confirm_owner_only)
+    for user in deciders:
         if user.id != actor.user.id:
             notifier.send(user.telegram_id, "Новая операция на подтверждение:\n" + text, ui.entry_kb(entry))
 
@@ -128,7 +129,7 @@ async def _quick_op(message, items, dept, session, actor, settings, notifier, is
     hook = remember_card(sessionmaker, WorkEntry, entry.id) if result.created and chat_id else None
     notifier.answer(message, card, ui.entry_kb(entry), on_sent=hook)
     if result.created:
-        await _notify_confirmers(session, notifier, entry, actor, chat_id)
+        await _notify_confirmers(session, notifier, settings, entry, actor, chat_id)
 
 
 @router.callback_query(OpWizard.employee, F.data.startswith("opw:e:"))
@@ -230,7 +231,7 @@ async def entry_action(callback: CallbackQuery, session, actor, settings, notifi
         if changed:
             entry.message_id = callback.message.message_id
             entry.chat_id = entry.chat_id or (None if is_private else callback.message.chat.id)
-            await _notify_confirmers(session, notifier, entry, actor, entry.chat_id)
+            await _notify_confirmers(session, notifier, settings, entry, actor, entry.chat_id)
     elif action == "d":
         day = settings.today() - dt.timedelta(days=int(parts[3]))
         entry = await work.update_draft(session, actor, settings, entry_id, performed_on=day)

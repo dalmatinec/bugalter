@@ -261,6 +261,25 @@ async def users_with_perm(session: AsyncSession, perm: str, department_id: int |
     return list(rows)
 
 
+async def owners(session: AsyncSession) -> list[User]:
+    rows = (
+        await session.execute(
+            select(User)
+            .join(AccessGrant, AccessGrant.user_id == User.id)
+            .where(AccessGrant.role_code == OWNER_ROLE, AccessGrant.revoked_at.is_(None), User.is_active)
+            .distinct()
+        )
+    ).scalars()
+    return list(rows)
+
+
+async def deciders(session: AsyncSession, perm: str, department_id: int | None, owner_only: bool) -> list[User]:
+    """Кого звать подтверждать: только владельцев (так по умолчанию) или всех, у кого есть право."""
+    if owner_only:
+        return await owners(session)
+    return await users_with_perm(session, perm, department_id)
+
+
 async def list_grants(session: AsyncSession, user_id: int | None = None) -> list[tuple]:
     query = (
         select(AccessGrant, User, Department)

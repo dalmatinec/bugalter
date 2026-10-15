@@ -3,7 +3,9 @@
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
+from sqlalchemy import func, select
 
+from ....db.models import Tariff
 from ....domain.money import currency_label, fmt_money, fmt_number
 from ....services import reference
 from ....services import settings as settings_service
@@ -32,11 +34,26 @@ ROUNDING_TITLES = {
     "DOWN": "всегда вниз",
     "UP": "всегда вверх",
 }
+# Переключатель: (что значит, коротко для кнопки).
 TOGGLES = {
-    "group_show_amounts": "👁 Суммы в рабочих группах",
-    "allow_self_confirm": "✍️ Автор может сам подписать премию/штраф",
-    "payout_requires_confirmation": "💸 Выплату отдельно подтверждает владелец",
-    "deduction_requires_consent": "🤝 Удержание только с согласия сотрудника",
+    "confirm_owner_only": (
+        "✅ Работу подтверждает только владелец. Если выключить, подтверждают ещё и руководители",
+        "Работу подтв. владелец",
+    ),
+    "payout_confirm_owner_only": (
+        "💸 Выплату подтверждает только владелец. Если выключить, ещё руководитель и бухгалтер",
+        "Выплату подтв. владелец",
+    ),
+    "payout_requires_confirmation": (
+        "🧾 Выплата засчитывается только после подтверждения. Если выключить, сразу при записи",
+        "Подтверждать выплаты",
+    ),
+    "allow_self_confirm": (
+        "✍️ Руководитель может сам подтвердить то, что сам внёс (но не в свою пользу)",
+        "Своё подтверждать",
+    ),
+    "group_show_amounts": ("👁 Суммы видны в рабочих группах", "Суммы в группах"),
+    "deduction_requires_consent": ("🤝 Штраф и удержание только с согласия сотрудника", "Согласие на удержание"),
 }
 
 
@@ -58,15 +75,18 @@ async def settings_view(settings):
         f"📉 Лимит удержаний: <b>{limit}</b>",
         f"💳 Аванс в долг по умолчанию: <b>{credit}</b>",
     ]
-    for key, title in TOGGLES.items():
+    lines.append("")
+    for key, (title, _short) in TOGGLES.items():
         lines.append(f"{title}: <b>{'да' if getattr(settings, key) else 'нет'}</b>")
     rows = [
         [("💱 Валюта", "p:s:cur"), ("🕐 Часовой пояс", "p:s:tz")],
         [("📅 Периоды", "p:s:split"), ("🔢 Округление", "p:s:rnd")],
-        [("📉 Лимит удержаний", "p:s:lim"), ("💳 Аванс по умолчанию", "p:s:cr")],
+        [("📉 Лимит удержаний", "p:s:lim"), ("💳 Аванс в долг", "p:s:cr")],
     ]
-    for key, title in TOGGLES.items():
-        rows.append([(f"{'✅' if getattr(settings, key) else '⬜️'} {title[2:]}", f"p:s:t:{key}")])
+    toggles = [
+        (f"{'✅' if getattr(settings, key) else '⬜️'} {short}", f"p:s:t:{key}") for key, (_, short) in TOGGLES.items()
+    ]
+    rows += [toggles[i : i + 2] for i in range(0, len(toggles), 2)]
     rows.append([("⬅️ Назад", "p:more")])
     return "\n".join(lines), kb(rows)
 
@@ -108,7 +128,14 @@ async def settings_currency(callback: CallbackQuery, session, settings, notifier
 @router.callback_query(F.data.startswith("p:s:cur:"))
 async def settings_currency_set(callback: CallbackQuery, session, actor, notifier):
     new = await _set(session, actor, "currency", callback.data.split(":")[3])
-    show(callback, notifier, *await settings_view(new))
+    text, markup = await settings_view(new)
+    other = await session.scalar(select(func.count()).select_from(Tariff).where(Tariff.currency != new.currency))
+    if other:
+        text = (
+            f"⚠️ Цены, заданные раньше, остались в старой валюте ({other} шт.). "
+            "Задайте их заново в Работах и ценах, чтобы считать в новой.\n\n" + text
+        )
+    show(callback, notifier, text, markup)
 
 
 @router.callback_query(F.data == "p:s:tz")

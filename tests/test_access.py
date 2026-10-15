@@ -8,14 +8,10 @@ from bugalter.services import settings as settings_service
 
 async def test_department_scoping(world):
     w = world
-    assert w.manager.can(Perm.WORK_CREATE, w.north.id)
-    assert not w.manager.can(Perm.WORK_CREATE, w.south.id)
-    assert not w.manager.can(Perm.WORK_CREATE)  # глобального права нет
-    # Подтверждение операций и выплат — только владелец, даже у админа с остальными полными правами.
-    assert not w.manager.can(Perm.WORK_CONFIRM, w.north.id)
-    assert not w.admin.can(Perm.WORK_CONFIRM, w.south.id)
-    assert not w.admin.can(Perm.PAYROLL_PAYOUT_CONFIRM, w.south.id)
-    assert w.owner.can(Perm.WORK_CONFIRM, w.south.id) and w.owner.can(Perm.PAYROLL_PAYOUT_CONFIRM, w.south.id)
+    assert w.manager.can(Perm.WORK_CONFIRM, w.north.id)
+    assert not w.manager.can(Perm.WORK_CONFIRM, w.south.id)
+    assert not w.manager.can(Perm.WORK_CONFIRM)  # глобального права нет
+    assert w.admin.can(Perm.WORK_CONFIRM, w.south.id)
     assert not w.admin.can(Perm.PERIOD_REOPEN)
     assert w.owner.can(Perm.PERIOD_REOPEN) and w.owner.is_owner
     assert not w.ivan_actor.can_anywhere(Perm.WORK_CREATE)

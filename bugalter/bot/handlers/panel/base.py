@@ -12,7 +12,7 @@ from sqlalchemy import select
 from ....db.models import Role
 from ....domain.errors import ValidationError
 from ....domain.money import fmt_number, fmt_price
-from ....domain.permissions import OWNER_ROLE, Perm
+from ....domain.permissions import Perm
 
 PAGE = 8
 
@@ -92,22 +92,18 @@ async def role_names(session) -> dict[str, str]:
 
 
 ROLES_HELP = (
-    "• <b>Оператор</b>: вносит операции и складские движения в группе\n"
-    "• <b>Руководитель</b>: ведёт операции, премии и штрафы, выплаты, ставки своего подразделения "
-    "(подтверждает операции и выплаты только владелец)\n"
-    "• <b>Кладовщик</b>: склад и инвентаризация\n"
-    "• <b>Бухгалтер</b>: выплаты, премии, отчёты\n"
-    "• <b>Администратор</b>: всё, кроме прав владельца\n"
-    "Сотруднику без роли бот показывает только его работу и расчёт."
+    "👷 <b>Работник</b> (без роли): видит в личке свою работу и зарплату, может запросить выплату\n"
+    "📝 <b>Оператор</b>: ещё вносит работу и склад в рабочих группах\n"
+    "👔 <b>Руководитель</b>: ещё ставки, премии, штрафы и выплаты. "
+    "Подтверждать работу и выплаты может, только если владелец разрешит в Настройках"
 )
+
+# Роли, которые предлагаются кнопками. Остальные (кладовщик, бухгалтер, администратор) остаются в базе
+# для совместимости, но в простом режиме не нужны.
+OFFERED_ROLES = {"operator": "📝 Оператор", "manager": "👔 Руководитель"}
 
 
 async def role_choice(session, prefix: str, back: str) -> InlineKeyboardMarkup:
-    rows = []
-    roles = (await session.execute(select(Role).order_by(Role.code))).scalars()
-    for role in roles:
-        if role.code == OWNER_ROLE:
-            continue
-        rows.append([(role.name, f"{prefix}:{role.code}")])
+    rows = [[(title, f"{prefix}:{code}")] for code, title in OFFERED_ROLES.items()]
     rows.append([("⬅️ Назад", back)])
     return kb(rows)

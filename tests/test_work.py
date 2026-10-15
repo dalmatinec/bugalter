@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import datetime as dt
 from decimal import Decimal
 
@@ -211,12 +212,27 @@ async def test_confirm_rules(world, session, settings):
     entry = (await create(w, settings, w.ivan, w.delivery, "1", d(16))).entry
     with pytest.raises(AccessDenied):
         await work.confirm_entry(session, w.operator, settings, entry.id)  # нет права
-    with pytest.raises(AccessDenied):
-        await work.confirm_entry(session, w.manager, settings, entry.id)  # подтверждение — только владелец
-    # Владельцу можно подтвердить даже запись о работе руководителя (единственное исключение «не в свою пользу»)
+    # По умолчанию подтверждает только владелец
+    with pytest.raises(AccessDenied, match="только владелец"):
+        await work.confirm_entry(session, w.manager, settings, entry.id)
+    with pytest.raises(AccessDenied, match="только владелец"):
+        await work.reject_entry(session, w.manager, settings, entry.id, None)
+
+    # Владелец разрешил руководителям в настройках
+    open_ = dataclasses.replace(settings, confirm_owner_only=False)
+    await work.confirm_entry(session, w.manager, open_, entry.id)
+    # Руководитель — сам исполнитель операции
     await w.tariff(w.processing, "50", d(1), dept=w.north)
     own = (await create(w, settings, w.anna_emp, w.processing, "1", d(16))).entry
-    await work.confirm_entry(session, w.owner, settings, own.id)
+    with pytest.raises(AccessDenied, match="свою пользу"):
+        await work.confirm_entry(session, w.manager, open_, own.id)
+    await work.confirm_entry(session, w.owner, settings, own.id)  # владельцу можно
+    # Автор = подтверждающий при выключенной настройке
+    strict = dataclasses.replace(open_, allow_self_confirm=False)
+    authored = (await create(w, settings, w.ivan, w.delivery, "1", d(16), actor=w.manager)).entry
+    with pytest.raises(AccessDenied, match="allow_self_confirm"):
+        await work.confirm_entry(session, w.manager, strict, authored.id)
+    await work.confirm_entry(session, w.manager, open_, authored.id)
 
 
 async def test_cancel_confirmed_creates_reversal(world, session, settings):

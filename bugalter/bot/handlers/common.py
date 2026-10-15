@@ -3,37 +3,41 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
+from ...domain.money import currency_label
 from ...domain.permissions import Perm
 from .. import ui
 from ..ui import h
 
 router = Router(name="common")
 
-HELP_EMPLOYEE = """<b>Личный кабинет</b> (только в личке с ботом)
-📊 Моя работа: /my_work [прошлый|месяц|01.10-15.10]
-💰 Мой расчёт: /my_salary [прошлый]
-📦 Товар на руках: /my_stock
-💸 Запрос выплаты: /request_payout &lt;сумма&gt; [комментарий]
-🧾 Мои выплаты: /my_payouts
-/id: мой Telegram ID (передайте администратору)"""
+HELP_EMPLOYEE = """<b>Ваше меню</b> (в личке с ботом)
+📊 Моя работа: что сделано и сколько начислено
+💰 Мой расчёт: зарплата, премии, удержания, выплаты, остаток
+💸 Запросить выплату: в пределах заработанного (и аванса в долг, если разрешён)
+🧾 Мои выплаты: история
+{stock}
+<b>Отчёт о работе</b> пишите в своей рабочей группе одной строкой на каждую работу:
+<code>#доставка 3</code>, <code>#фасовка05 20</code>. Число после тега: сколько сделали (без числа значит 1).
+Бот посчитает по цене из настроек и отправит на подтверждение."""
+
+HELP_STOCK = "📦 Мои товары: что сейчас числится на вас\n"
 
 HELP_GROUP = """<b>В рабочей группе</b>
-/op: внести операцию (мастер с кнопками)
-/op &lt;сотрудник&gt; &lt;работа&gt; &lt;кол-во&gt; [#заказ] [вчера|ДД.ММ] [*коэффициент] [комментарий]: быстрый ввод (коэффициенты заведены в Управлении, Работы и цены)
+/op: внести работу кнопками
+Или строками с тегами в группе сотрудника: <code>#доставка 3</code>
 /pending: ждут подтверждения, /ops [сегодня|неделя|месяц]: сводка
 /cancel_op &lt;№&gt; &lt;причина&gt;, /reject_op &lt;№&gt; &lt;причина&gt;
-<b>Склад</b>: /receive &lt;артикул&gt; &lt;кол-во&gt; [ед.] [cost=цена], /issue /move /send /return /sold /writeoff /inv /stock /transit /cases"""
+<b>Склад</b>: /receive &lt;товар&gt; &lt;кол-во&gt; [ед.] [cost=цена], /issue /move /send /return /sold /writeoff /inv /stock /transit /cases"""
 
-HELP_MANAGER = """<b>Деньги</b> (только в личке)
-/bonus /penalty /deduct &lt;сотрудник&gt; &lt;сумма&gt; [USD] &lt;основание&gt;: выписать
+HELP_MANAGER = """<b>Деньги</b> (только в личке), суммы в {cur}
+/bonus /penalty /deduct &lt;сотрудник&gt; &lt;сумма&gt; &lt;основание&gt;: выписать
 /adjs: на подпись, /adj_cancel &lt;№&gt; &lt;причина&gt;
-/payout &lt;сотрудник&gt; &lt;сумма&gt; [USD] [аванс|зп] [комментарий], /payouts, /payout_cancel &lt;№&gt; &lt;причина&gt;
+/payout &lt;сотрудник&gt; &lt;сумма&gt; [аванс|зп] [комментарий], /payouts, /payout_cancel &lt;№&gt; &lt;причина&gt;
 /requests: запросы выплат, /balance &lt;сотрудник&gt; [прошлый|период]
-Лимит аванса в долг: карточка сотрудника в Управлении
-/case &lt;№&gt; employee cost: недостача по себестоимости, /batches &lt;артикул&gt;: партии
+/case &lt;№&gt; employee cost: недостача по себестоимости, /batches &lt;товар&gt;: партии
 /periods, /period_close &lt;№&gt;, /period_reopen &lt;№&gt; &lt;причина&gt; (владелец)
 <b>Отчёты</b>: /report emp|dept|ops|stock|moves|payouts|adj|debts … [период] [xlsx|csv]
-<b>Настройка</b>: /admin"""
+<b>Настройка</b>: кнопка ⚙️ Управление"""
 
 
 @router.message(CommandStart())
@@ -41,33 +45,30 @@ async def start(message: Message, command: CommandObject, session, actor, is_pri
     from .panel import accept_invite_start, can_admin
 
     if not is_private:
-        notifier.answer(message, "Я работаю в этой группе. Команды: /help")
         return
     if command.args and command.args.startswith("inv_"):
         await accept_invite_start(message, command.args[4:], session, actor, notifier)
         return
     admin = can_admin(actor)
-    lines = [f"Здравствуйте, {h(message.from_user.full_name)}!"]
+    lines = []
     if actor.employee:
-        lines.append(f"Вы сотрудник <b>{h(actor.employee.full_name)}</b>.")
-    elif not admin:
-        lines.append(
-            f"Ваш Telegram ID: <code>{message.from_user.id}</code>. "
-            "Попросите у руководителя ссылку-приглашение, по ней бот привяжет вас автоматически."
-        )
+        lines.append(f"Вы: <b>{h(actor.employee.full_name)}</b>. Меню внизу.")
     if admin:
         lines.append("Настройка: кнопка ⚙️ Управление внизу.")
-    notifier.answer(message, "\n".join(lines), ui.main_menu(admin))
+    notifier.answer(message, "\n".join(lines) or "Меню внизу.", await ui.main_menu_for(session, actor, admin))
 
 
 @router.message(Command("help"))
 @router.message(F.text == ui.BTN_HELP)
-async def help_cmd(message: Message, actor, notifier):
-    parts = [HELP_EMPLOYEE]
+async def help_cmd(message: Message, session, actor, settings, notifier):
+    parts = []
+    if actor.employee:
+        stock = HELP_STOCK if await ui.has_stock(session, actor.employee.id) else ""
+        parts.append(HELP_EMPLOYEE.format(stock=stock))
     if actor.can_anywhere(Perm.WORK_CREATE) or actor.can_anywhere(Perm.STOCK_OPERATE):
         parts.append(HELP_GROUP)
     if actor.can_anywhere(Perm.PAYROLL_ADJUST) or actor.can_anywhere(Perm.PAYROLL_PAYOUT) or actor.is_owner:
-        parts.append(HELP_MANAGER)
+        parts.append(HELP_MANAGER.format(cur=f"{currency_label(settings.currency)} ({settings.currency})"))
     notifier.answer(message, "\n\n".join(parts))
 
 

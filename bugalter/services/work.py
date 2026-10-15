@@ -340,8 +340,26 @@ async def submit_entry(session: AsyncSession, actor, entry_id: int) -> tuple[Wor
     return entry, True
 
 
-def _check_confirmer(actor, entry: WorkEntry) -> None:
+OWNER_ONLY_CONFIRM = "Подтверждает только владелец. Разрешить руководителям: Управление, Ещё, Настройки"
+
+
+def _check_decider(actor, entry: WorkEntry, settings: Settings) -> None:
+    """Кто может подтвердить или отклонить операцию."""
     actor.require(Perm.WORK_CONFIRM, entry.department_id)
+    if actor.is_owner:
+        return
+    if settings.confirm_owner_only:
+        raise AccessDenied(OWNER_ONLY_CONFIRM)
+
+
+def _check_confirmer(actor, entry: WorkEntry, settings: Settings) -> None:
+    _check_decider(actor, entry, settings)
+    if actor.is_owner:
+        return
+    if actor.is_self(entry.employee_id):
+        raise AccessDenied("Нельзя подтверждать операции в свою пользу")
+    if entry.created_by == actor.user.id and not settings.allow_self_confirm:
+        raise AccessDenied("Автор операции не может сам её подтвердить (настройка allow_self_confirm)")
 
 
 async def confirm_entry(
@@ -353,7 +371,7 @@ async def confirm_entry(
         return entry, None, False
     if entry.status != "pending":
         raise Conflict(f"{entry.number}: подтвердить нельзя, статус {STATUS_TITLES[entry.status]}")
-    _check_confirmer(actor, entry)
+    _check_confirmer(actor, entry, settings)
     wt = await session.get(WorkType, entry.work_type_id)
     if (entry.calc_details or {}).get("tiered"):
         # Ступени считаются от подтверждённого объёма: блокируем сотрудника, чтобы две операции,
@@ -407,7 +425,7 @@ async def reject_entry(
         return entry
     if entry.status != "pending":
         raise Conflict(f"{entry.number}: отклонить нельзя, статус {STATUS_TITLES[entry.status]}")
-    actor.require(Perm.WORK_CONFIRM, entry.department_id)
+    _check_decider(actor, entry, settings)
     entry.status = "rejected"
     entry.decided_by = actor.user.id
     entry.decided_at = func.now()

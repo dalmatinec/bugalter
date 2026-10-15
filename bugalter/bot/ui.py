@@ -13,6 +13,7 @@ from ..db.models import (
     Currency,
     Department,
     Employee,
+    Location,
     Payout,
     PayoutRequest,
     StockDocument,
@@ -30,22 +31,36 @@ STATUS_ICONS = {"draft": "📝", "pending": "⏳", "confirmed": "✅", "rejected
 
 BTN_MY_WORK = "📊 Моя работа"
 BTN_MY_SALARY = "💰 Мой расчёт"
-BTN_MY_STOCK = "📦 Товар на руках"
+BTN_MY_STOCK = "📦 Мои товары"
 BTN_REQUEST = "💸 Запросить выплату"
 BTN_MY_PAYOUTS = "🧾 Мои выплаты"
 BTN_HELP = "❓ Помощь"
 BTN_PANEL = "⚙️ Управление"
 
 
-def main_menu(admin: bool = False) -> ReplyKeyboardMarkup:
-    rows = [
-        [KeyboardButton(text=BTN_MY_WORK), KeyboardButton(text=BTN_MY_SALARY)],
-        [KeyboardButton(text=BTN_MY_STOCK), KeyboardButton(text=BTN_REQUEST)],
-        [KeyboardButton(text=BTN_MY_PAYOUTS), KeyboardButton(text=BTN_HELP)],
-    ]
+def main_menu(admin: bool = False, employee: bool = True, stock: bool = False) -> ReplyKeyboardMarkup:
+    """Меню внизу. Мои товары только у тех, кому выдавали товар; у владельца без карточки только Управление."""
+    buttons = []
+    if employee:
+        buttons = [BTN_MY_WORK, BTN_MY_SALARY, BTN_REQUEST, BTN_MY_PAYOUTS]
+        if stock:
+            buttons.insert(2, BTN_MY_STOCK)
     if admin:
-        rows.insert(0, [KeyboardButton(text=BTN_PANEL)])
+        buttons.insert(0, BTN_PANEL)
+    buttons.append(BTN_HELP)
+    rows = [[KeyboardButton(text=t) for t in buttons[i : i + 2]] for i in range(0, len(buttons), 2)]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+async def has_stock(session: AsyncSession, employee_id: int) -> bool:
+    found = await session.execute(select(Location.id).where(Location.employee_id == employee_id).limit(1))
+    return found.first() is not None
+
+
+async def main_menu_for(session: AsyncSession, actor, admin: bool) -> ReplyKeyboardMarkup:
+    emp = actor.employee
+    stock_menu = emp is not None and await has_stock(session, emp.id)
+    return main_menu(admin, employee=emp is not None, stock=stock_menu)
 
 
 async def minor_units(session: AsyncSession, code: str) -> int:
@@ -68,23 +83,25 @@ async def user_name(session: AsyncSession, user_id: int | None) -> str:
 
 
 async def employee_label(session: AsyncSession, employee_id: int | None) -> str:
-    """Для карточек, которые видят все в рабочей группе: должность вместо имени, если она задана."""
+    """Сотрудника везде видно по должности (она и есть его подпись в боте)."""
     if not employee_id:
         return "-"
     emp = await session.get(Employee, employee_id)
-    if emp is None:
-        return "-"
-    return emp.position or emp.full_name
+    return emp.full_name if emp else "-"
 
 
 async def actor_label(session: AsyncSession, user_id: int | None) -> str:
-    """Кто выполнил действие, для карточек в группе: у привязанного сотрудника - должность вместо имени."""
+    """Кто нажал кнопку: у сотрудника его должность, у владельца без карточки - имя из Telegram."""
     if not user_id:
         return "-"
     emp = (await session.execute(select(Employee).where(Employee.user_id == user_id))).scalar_one_or_none()
-    if emp is not None and emp.position:
-        return emp.position
+    if emp is not None:
+        return emp.full_name
     return await user_name(session, user_id)
+
+
+def telegram_nick(user: User) -> str:
+    return f"@{user.username}" if user.username else (user.full_name or "без ника")
 
 
 # ------------------------------------------------------------------ операции

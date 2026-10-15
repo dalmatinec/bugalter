@@ -265,7 +265,7 @@ async def test_stock_flow_with_receipt_confirmation(h, session):
     assert await stock.balance(session, loc.id, (await stock.get_product(session, "coffee")).id) == Decimal("10")
     out = texts(await h.say(OPERATOR, "/issue ivan coffee 1000", GROUP))
     assert "Недостаточно" in out
-    out = texts(await h.say(IVAN, "📦 Товар на руках"))
+    out = texts(await h.say(IVAN, "📦 Мои товары"))
     assert "Кофе зерно: 10 кг" in out
 
 
@@ -399,25 +399,45 @@ async def test_admin_panel_simple_setup(h, session):
 
     out = texts(await h.say(OWNER, "/start"))
     assert "Управление" in out
-    out = await h.say(OWNER, "⚙️ Управление")
-    markup = out[-1].reply_markup
+    # Первый вход в Управление: сначала валюта
+    out = texts(await h.say(OWNER, "⚙️ Управление"))
+    assert "в какой валюте" in out
+    out = await h.press(OWNER, "p:first:USD")
+    markup = next(c.reply_markup for c in out if getattr(c, "reply_markup", None))
     labels = [b.text for row in markup.inline_keyboard for b in row]
     assert labels == ["👥 Сотрудники", "💰 Работы и цены", "💬 Группы", "➕ Ещё"]
+    out = await h.say(OWNER, "⚙️ Управление")
+    assert [b.text for row in out[-1].reply_markup.inline_keyboard for b in row] == labels
     dept = (await session.execute(select(Department))).scalar_one()  # создана автоматически
 
-    # Сотрудник: имя → кто он → ссылка
-    await h.press(OWNER, "p:e:add:0")
-    out = texts(await h.say(OWNER, "Иван Иванов"))
-    assert "Кто он?" in out and "подразделен" not in out.lower()
+    # Пока человек не подключён по ссылке, бот ему не отвечает
+    assert await h.say(IVAN, "/start") == []
+
+    # Сотрудник: должность → что может → ссылка
+    out = texts(await h.press(OWNER, "p:e:add:0"))
+    assert "Какая должность?" in out
+    out = texts(await h.say(OWNER, "Курьер"))
+    assert "Добавлен: <b>Курьер</b>" in out and "подразделен" not in out.lower()
     emp = (await session.execute(select(Employee))).scalar_one()
+    assert emp.full_name == "Курьер"
     out = texts(await h.press(OWNER, f"p:e:who:{emp.id}:operator"))
     link = re.search(r"https://t.me/bugalter_test_bot\?start=(inv_[\w-]+)", out)
     assert link, out
-    out = texts(await h.say(IVAN, f"/start {link.group(1)}"))
-    assert "Вы подключены как" in out and "Оператор" in out
+    out = await h.say(IVAN, f"/start {link.group(1)}")
+    assert "Вы подключены: <b>Курьер</b>" in texts(out) and "Оператор" in texts(out)
+    menu = next(c.reply_markup for c in out if getattr(c, "chat_id", None) == IVAN)
+    buttons = [b.text for row in menu.keyboard for b in row]
+    assert "📊 Моя работа" in buttons and "📦 Мои товары" not in buttons  # товар ему ещё не выдавали
     grant = (await session.execute(select(AccessGrant).where(AccessGrant.role_code == "operator"))).scalar_one()
     assert grant.department_id == dept.id
     assert "недействительна" in texts(await h.say(IVAN, f"/start {link.group(1)}"))
+    # Ник и ID видит только владелец
+    out = texts(await h.press(OWNER, f"p:e:v:{emp.id}"))
+    assert f"ID <code>{IVAN}</code>" in out
+
+    # Второй курьер получает различимую подпись
+    await h.press(OWNER, "p:e:add:0")
+    assert "Добавлен: <b>Курьер 2</b>" in texts(await h.say(OWNER, "курьер"))
 
     # Работа: название → как платим → за что → цена
     await h.press(OWNER, "p:w:add")
@@ -465,7 +485,7 @@ async def test_admin_panel_simple_setup(h, session):
 
     # Оператор Иван вносит работу в своей группе без кода сотрудника
     out = texts(await h.say(IVAN, "/op доставка 3 #Z-1", GROUP))
-    assert "Иван Иванов" in out and "ожидает подтверждения" in out
+    assert "Курьер" in out and "ожидает подтверждения" in out
 
     # Товар — в «Ещё»
     await h.press(OWNER, "p:pr:add")

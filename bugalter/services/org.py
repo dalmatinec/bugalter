@@ -98,7 +98,7 @@ async def create_employee(
     if (await session.execute(select(Employee.id).where(Employee.code == code))).first():
         raise ValidationError(f"Сотрудник с кодом {code} уже есть")
     if not full_name.strip():
-        raise ValidationError("Укажите ФИО сотрудника")
+        raise ValidationError("Укажите должность сотрудника")
     employee = Employee(code=code, full_name=full_name.strip(), position=position)
     session.add(employee)
     await session.flush()
@@ -159,14 +159,39 @@ async def set_employee_active(session: AsyncSession, actor, employee: Employee, 
     await audit(session, actor.user.id, "org.employee_active", "employee", employee.id, {"active": active})
 
 
-async def set_employee_position(session: AsyncSession, actor, employee: Employee, position: str | None) -> None:
-    """Должность — то, что видят в рабочей группе вместо имени (ФИО остаётся только в карточке)."""
+async def free_title(session: AsyncSession, title: str, exclude_id: int | None = None) -> str:
+    """Должность как подпись сотрудника должна различаться: второй «Курьер» становится «Курьер 2»."""
+    title = " ".join(title.split())
+    if not title:
+        raise ValidationError("Укажите должность сотрудника")
+    title = title[0].upper() + title[1:]
+    if len(title) > 60:
+        raise ValidationError("Должность - до 60 символов")
+    query = select(Employee.full_name)
+    if exclude_id is not None:
+        query = query.where(Employee.id != exclude_id)
+    taken = {name.lower() for name in (await session.execute(query)).scalars()}
+    candidate, n = title, 1
+    while candidate.lower() in taken:
+        n += 1
+        candidate = f"{title} {n}"
+    return candidate
+
+
+async def create_employee_by_title(session: AsyncSession, actor, title: str) -> Employee:
+    """Сотрудник заводится по должности. Имя не нужно: ник и ID появятся, когда он откроет ссылку."""
+    title = await free_title(session, title)
+    code = await unique_code(session, Employee.code, title)
+    return await create_employee(session, actor, code, title, position=title)
+
+
+async def set_employee_title(session: AsyncSession, actor, employee: Employee, title: str) -> None:
     await _require_org_for_employee(session, actor, employee)
-    position = (position or "").strip() or None
-    if position and len(position) > 64:
-        raise ValidationError("Должность - до 64 символов")
-    employee.position = position
-    await audit(session, actor.user.id, "org.employee_position", "employee", employee.id, {"position": position})
+    title = await free_title(session, title, exclude_id=employee.id)
+    old = employee.full_name
+    employee.full_name = title
+    employee.position = title
+    await audit(session, actor.user.id, "org.employee_title", "employee", employee.id, {"old": old, "new": title})
 
 
 async def _require_org_for_employee(session: AsyncSession, actor, employee: Employee) -> None:

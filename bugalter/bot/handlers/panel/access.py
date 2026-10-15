@@ -78,7 +78,7 @@ async def role_grant(callback: CallbackQuery, session, actor, settings, notifier
     notifier.send(user.telegram_id, f"Вам выдана роль {h(role_name)}. Справка: /help")
     emp = (await session.execute(select(Employee).where(Employee.user_id == user.id))).scalar_one_or_none()
     if emp:
-        show(callback, notifier, *await employee_view(session, settings, emp.id))
+        show(callback, notifier, *await employee_view(session, settings, emp.id, actor))
     else:
         show(callback, notifier, *await access_view(session))
 

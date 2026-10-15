@@ -3,6 +3,7 @@
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
+from sqlalchemy import func, select
 
 from ...db.models import Employee, Location, Product, StockDocument, User
 from ...domain.errors import AccessDenied, ValidationError
@@ -49,6 +50,16 @@ async def _ask_recipient(session, notifier, doc: StockDocument, card: str):
         if emp.user_id:
             user = await session.get(User, emp.user_id)
             notifier.send(user.telegram_id, "Вам передан товар. Подтвердите получение:\n" + card, ui.stock_doc_kb(doc))
+            first = await session.scalar(
+                select(func.count()).select_from(StockDocument).where(StockDocument.target_employee_id == emp.id)
+            )
+            if first == 1:
+                # Кнопка Мои товары появляется в меню, как только сотруднику впервые выдали товар.
+                from .panel import can_admin
+
+                recipient = await access.actor_for_user(session, user)
+                menu = await ui.main_menu_for(session, recipient, can_admin(recipient))
+                notifier.send(user.telegram_id, "В меню появилась кнопка 📦 Мои товары.", menu)
 
 
 @router.message(Command("receive"))
@@ -56,7 +67,7 @@ async def receive(
     message: Message, command: CommandObject, session, actor, settings, chat_dept, notifier, is_private, sessionmaker
 ):
     ex = extract(tokens(command.args), ("cost", "cur"))
-    need(ex.rest, 2, "/receive <артикул> <кол-во> [единица] [cost=цена за единицу] [cur=USD] [комментарий]")
+    need(ex.rest, 2, "/receive <артикул> <кол-во> [единица] [cost=цена за единицу] [cur=валюта] [комментарий]")
     dept = await resolve_department(session, actor, chat_dept, ex.dept, Perm.STOCK_OPERATE)
     product = await stock.get_product(session, ex.rest[0])
     qty, unit, rest = await _qty_unit(session, ex.rest[1:])
@@ -266,7 +277,7 @@ async def inventory(message: Message, command: CommandObject, session, actor, ch
             f"\n⚠️ {kind} {fmt_qty(res.case.qty, product.base_unit)}, расхождение <b>{res.case.number}</b> "
             "ждёт решения. Денежных последствий пока нет.\n"
             f"Решение: /case {res.case.id} company  или  "
-            f"/case {res.case.id} employee &lt;цена&gt; [USD] &lt;основание&gt;"
+            f"/case {res.case.id} employee &lt;цена&gt; &lt;основание&gt;"
         )
         if res.created:
             for user in await access.users_with_perm(session, Perm.STOCK_CASE_DECIDE, dept.id):
@@ -283,7 +294,7 @@ async def case(message: Message, command: CommandObject, session, actor, setting
     need(
         items,
         2,
-        "/case <№> company | /case <№> employee cost | /case <№> employee <цена за баз. единицу> [USD] <основание>",
+        "/case <№> company | /case <№> employee cost | /case <№> employee <цена за баз. единицу> <основание>",
     )
     case_id = parse_id(items[0])
     decision = items[1].lower()
@@ -293,7 +304,7 @@ async def case(message: Message, command: CommandObject, session, actor, setting
         use_cost = True
         basis = " ".join(items[3:]) or None
     elif decision == "employee":
-        need(items, 4, "/case <№> employee <цена> [USD] <основание цены>  или  /case <№> employee cost")
+        need(items, 4, "/case <№> employee <цена> <основание цены>  или  /case <№> employee cost")
         price = parse_decimal(items[2], what="цену")
         rest = items[3:]
         if rest and rest[0].upper() in await reference.currency_codes(session):
@@ -452,7 +463,7 @@ async def my_stock(message: Message, session, actor, notifier, is_private):
     if actor.employee is None:
         raise ValidationError("Ваш Telegram не привязан к карточке сотрудника")
     rows = await stock.balances(session, employee_id=actor.employee.id)
-    lines = ["📦 <b>Товар на руках</b>"]
+    lines = ["📦 <b>Мои товары</b>"]
     for row in rows:
         lines.append(f"• {h(row.product.name)}: {fmt_qty(row.qty, row.product.base_unit)} ({h(row.location_title)})")
     if len(lines) == 1:

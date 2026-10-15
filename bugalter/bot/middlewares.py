@@ -37,6 +37,19 @@ def _db_error_text(exc: DBAPIError) -> str | None:
     return None
 
 
+class _Stranger(Exception):
+    """Пишет человек, которого бот не знает: молча откатываем транзакцию и ничего не отвечаем."""
+
+
+def _is_invite(event: TelegramObject, chat) -> bool:
+    return (
+        isinstance(event, Message)
+        and chat is not None
+        and chat.type == ChatType.PRIVATE
+        and (event.text or "").startswith("/start inv_")
+    )
+
+
 class ContextMiddleware(BaseMiddleware):
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], config: Config):
         self.sessionmaker = sessionmaker
@@ -58,6 +71,10 @@ class ContextMiddleware(BaseMiddleware):
             async with self.sessionmaker() as session:
                 async with session.begin():
                     actor = await access.load_actor(session, tg_user.id, tg_user.username, tg_user.full_name)
+                    # Отвечаем только своим: сотрудникам, владельцу и тем, у кого есть роль.
+                    # Чужой человек подключается только по ссылке-приглашению.
+                    if actor.employee is None and not actor.grants and not _is_invite(event, chat):
+                        raise _Stranger
                     settings = await get_settings(session)
                     chat_dept = chat_employee = None
                     if chat is not None and chat.type != ChatType.PRIVATE:
@@ -78,6 +95,9 @@ class ContextMiddleware(BaseMiddleware):
                 notifier.toast(event)
             await notifier.flush()
             return result
+        except _Stranger:
+            if isinstance(event, CallbackQuery):
+                await event.answer()
         except DomainError as exc:
             notifier.discard()
             await self._reply(event, f"⚠️ {exc}", notifier)

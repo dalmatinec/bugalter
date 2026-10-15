@@ -217,12 +217,14 @@ async def test_payout_cannot_exceed_balance(world, session, settings):
         kind="advance",
         idempotency_key=key(),
     )
-    # Подтвердить выплату может только владелец, даже если её регистрировал бухгалтер сам.
-    with pytest.raises(AccessDenied):
-        await payroll.confirm_payout(session, w.accountant, settings, p.id)
-    with pytest.raises(AccessDenied):
+    # По умолчанию выплату подтверждает только владелец
+    with pytest.raises(AccessDenied, match="только владелец"):
         await payroll.confirm_payout(session, w.manager, settings, p.id)
-    await payroll.confirm_payout(session, w.owner, settings, p.id)
+    # Владелец разрешил другим: тот, кто регистрировал, сам подтвердить не может при allow_self_confirm=нет
+    strict = dataclasses.replace(settings, payout_confirm_owner_only=False, allow_self_confirm=False)
+    with pytest.raises(AccessDenied, match="allow_self_confirm"):
+        await payroll.confirm_payout(session, w.accountant, strict, p.id)
+    await payroll.confirm_payout(session, w.manager, strict, p.id)
     assert (await ledger.balances(session, w.petr.id))["USD"] == D("100")
 
 

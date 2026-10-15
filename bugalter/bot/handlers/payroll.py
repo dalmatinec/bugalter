@@ -175,7 +175,8 @@ async def payout(message: Message, command: CommandObject, session, actor, setti
     if not created:
         return
     if p.status == "registered":
-        for user in await access.users_with_perm(session, Perm.PAYROLL_PAYOUT_CONFIRM, p.department_id):
+        owner_only = settings.payout_confirm_owner_only
+        for user in await access.deciders(session, Perm.PAYROLL_PAYOUT_CONFIRM, p.department_id, owner_only):
             if user.id != actor.user.id:
                 notifier.send(user.telegram_id, "Выплата ждёт подтверждения:\n" + card, ui.payout_kb(p))
     elif (tg := await _employee_tg(session, p.employee_id)) is not None:

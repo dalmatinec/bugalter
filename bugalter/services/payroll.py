@@ -561,6 +561,13 @@ async def confirm_payout(
     if payout.status != "registered":
         raise Conflict(f"{payout.number}: {PAYOUT_STATUS_TITLES[payout.status]}")
     actor.require(Perm.PAYROLL_PAYOUT_CONFIRM, payout.department_id)
+    if not actor.is_owner:
+        if settings.payout_confirm_owner_only:
+            raise AccessDenied("Выплату подтверждает только владелец. Изменить: Управление, Ещё, Настройки")
+        if actor.is_self(payout.employee_id):
+            raise AccessDenied("Нельзя подтверждать выплату самому себе")
+        if payout.registered_by == actor.user.id and not settings.allow_self_confirm:
+            raise AccessDenied("Регистрировал и подтверждает один человек (настройка allow_self_confirm)")
     entry = await _confirm_payout(session, settings, payout, actor.user.id)
     return payout, entry, True
 

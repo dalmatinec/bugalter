@@ -28,8 +28,14 @@ SPECS: dict[str, SettingSpec] = {
     "timezone": SettingSpec("UTC", "timezone", "Часовой пояс компании: граница дня и периода"),
     "payroll_split_day": SettingSpec("15", "int", "Последний день первой половины месяца (периоды 1-N и N+1-конец)"),
     "group_show_amounts": SettingSpec("false", "bool", "Показывать суммы начислений в рабочих группах"),
+    "confirm_owner_only": SettingSpec(
+        "true", "bool", "Работу подтверждает только владелец (если нет, то ещё и руководители)"
+    ),
+    "payout_confirm_owner_only": SettingSpec(
+        "true", "bool", "Выплату подтверждает только владелец (если нет, то ещё руководитель и бухгалтер)"
+    ),
     "allow_self_confirm": SettingSpec(
-        "true", "bool", "Автор операции/документа может сам его подтвердить (кроме записей в свою пользу)"
+        "true", "bool", "Кто внёс операцию или документ, может сам его подтвердить (кроме записей в свою пользу)"
     ),
     "payout_requires_confirmation": SettingSpec(
         "true", "bool", "Выплата попадает в расчёт только после отдельного подтверждения"
@@ -58,6 +64,8 @@ class Settings:
     timezone: str
     payroll_split_day: int
     group_show_amounts: bool
+    confirm_owner_only: bool
+    payout_confirm_owner_only: bool
     allow_self_confirm: bool
     payout_requires_confirmation: bool
     default_credit_limit: Decimal
