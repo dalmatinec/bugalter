@@ -27,7 +27,7 @@ async def test_reports_have_breakdown_and_export(world, session, settings):
             performed_on=dt.date(2026, 10, 20),
         )
     ).entry
-    await work.confirm_entry(session, w.manager, settings, entry.id)
+    await work.confirm_entry(session, w.owner, settings, entry.id)
     st = await payroll.build_statement(session, w.petr, date_from=dt.date(2026, 10, 16), date_to=dt.date(2026, 10, 31))
     table = await reports.employee_report(session, w.petr, st)
     assert ["Начислено за работу", "Доставка (1 оп.)", D(3), D(400), D("1200"), "USD"] == [

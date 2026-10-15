@@ -5,6 +5,7 @@ from html import escape
 
 from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import (
@@ -66,16 +67,35 @@ async def user_name(session: AsyncSession, user_id: int | None) -> str:
     return user.full_name or (f"@{user.username}" if user.username else str(user.telegram_id))
 
 
+async def employee_label(session: AsyncSession, employee_id: int | None) -> str:
+    """Для карточек, которые видят все в рабочей группе: должность вместо имени, если она задана."""
+    if not employee_id:
+        return "-"
+    emp = await session.get(Employee, employee_id)
+    if emp is None:
+        return "-"
+    return emp.position or emp.full_name
+
+
+async def actor_label(session: AsyncSession, user_id: int | None) -> str:
+    """Кто выполнил действие, для карточек в группе: у привязанного сотрудника - должность вместо имени."""
+    if not user_id:
+        return "-"
+    emp = (await session.execute(select(Employee).where(Employee.user_id == user_id))).scalar_one_or_none()
+    if emp is not None and emp.position:
+        return emp.position
+    return await user_name(session, user_id)
+
+
 # ------------------------------------------------------------------ операции
 
 
 async def entry_card(session: AsyncSession, entry: WorkEntry, show_amount: bool) -> str:
     wt = await session.get(WorkType, entry.work_type_id)
-    emp = await session.get(Employee, entry.employee_id)
     dept = await session.get(Department, entry.department_id)
     lines = [
         f"{STATUS_ICONS[entry.status]} <b>{entry.number}</b> · {STATUS_TITLES[entry.status]}",
-        f"👤 {h(emp.full_name)} · {h(dept.code)}",
+        f"👤 {h(await employee_label(session, entry.employee_id))} · {h(dept.code)}",
         f"🛠 {h(wt.name)} × {fmt_qty(entry.quantity, entry.unit_code)}",
         f"📅 {entry.performed_on:%d.%m.%Y}" + (f" · 🧾 #{h(entry.order_ref)}" if entry.order_ref else ""),
     ]
@@ -87,14 +107,14 @@ async def entry_card(session: AsyncSession, entry: WorkEntry, show_amount: bool)
         lines.append(
             f"💰 {calc_text(wt.calc_method, entry)} = <b>{await money(session, entry.amount, entry.currency)}</b>"
         )
-    lines.append(f"✍️ ввёл: {h(await user_name(session, entry.created_by))}")
+    lines.append(f"✍️ ввёл: {h(await actor_label(session, entry.created_by))}")
     if entry.decided_by:
         verb = "подтвердил" if entry.status in ("confirmed", "cancelled") else "решение"
-        lines.append(f"👮 {verb}: {h(await user_name(session, entry.decided_by))}")
+        lines.append(f"👮 {verb}: {h(await actor_label(session, entry.decided_by))}")
     if entry.decision_comment:
         lines.append(f"📝 {h(entry.decision_comment)}")
     if entry.status == "cancelled":
-        lines.append(f"🚫 отменил: {h(await user_name(session, entry.cancelled_by))}, {h(entry.cancel_reason or '')}")
+        lines.append(f"🚫 отменил: {h(await actor_label(session, entry.cancelled_by))}, {h(entry.cancel_reason or '')}")
     return "\n".join(lines)
 
 
@@ -151,8 +171,7 @@ async def stock_doc_card(session: AsyncSession, doc: StockDocument) -> str:
         lines.append(f"• {h(product.name)}: {qty}")
     for label, emp_id in (("от", doc.employee_id), ("кому", doc.target_employee_id)):
         if emp_id:
-            emp = await session.get(Employee, emp_id)
-            lines.append(f"👤 {label}: {h(emp.full_name)}")
+            lines.append(f"👤 {label}: {h(await employee_label(session, emp_id))}")
     if doc.target_department_id:
         target = await session.get(Department, doc.target_department_id)
         lines.append(f"🏢 в подразделение: {h(target.code)}")
@@ -160,9 +179,9 @@ async def stock_doc_card(session: AsyncSession, doc: StockDocument) -> str:
         lines.append(f"🧾 #{h(doc.order_ref)}")
     if doc.comment:
         lines.append(f"💬 {h(doc.comment)}")
-    lines.append(f"✍️ {h(await user_name(session, doc.created_by))}")
+    lines.append(f"✍️ {h(await actor_label(session, doc.created_by))}")
     if doc.accepted_by:
-        lines.append(f"📥 {h(await user_name(session, doc.accepted_by))}")
+        lines.append(f"📥 {h(await actor_label(session, doc.accepted_by))}")
     return "\n".join(lines)
 
 

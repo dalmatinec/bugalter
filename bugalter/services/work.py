@@ -340,14 +340,8 @@ async def submit_entry(session: AsyncSession, actor, entry_id: int) -> tuple[Wor
     return entry, True
 
 
-def _check_confirmer(actor, entry: WorkEntry, settings: Settings) -> None:
+def _check_confirmer(actor, entry: WorkEntry) -> None:
     actor.require(Perm.WORK_CONFIRM, entry.department_id)
-    if actor.is_owner:
-        return
-    if actor.is_self(entry.employee_id):
-        raise AccessDenied("Нельзя подтверждать операции в свою пользу")
-    if entry.created_by == actor.user.id and not settings.allow_self_confirm:
-        raise AccessDenied("Автор операции не может сам её подтвердить (настройка allow_self_confirm)")
 
 
 async def confirm_entry(
@@ -359,7 +353,7 @@ async def confirm_entry(
         return entry, None, False
     if entry.status != "pending":
         raise Conflict(f"{entry.number}: подтвердить нельзя, статус {STATUS_TITLES[entry.status]}")
-    _check_confirmer(actor, entry, settings)
+    _check_confirmer(actor, entry)
     wt = await session.get(WorkType, entry.work_type_id)
     if (entry.calc_details or {}).get("tiered"):
         # Ступени считаются от подтверждённого объёма: блокируем сотрудника, чтобы две операции,

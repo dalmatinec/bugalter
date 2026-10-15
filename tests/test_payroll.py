@@ -34,7 +34,7 @@ async def op(w, settings, emp, wt, qty, day, confirm=True):
         )
     ).entry
     if confirm:
-        await work.confirm_entry(w.session, w.manager, settings, entry.id)
+        await work.confirm_entry(w.session, w.owner, settings, entry.id)
     return entry
 
 
@@ -76,7 +76,7 @@ async def test_ivan_statement_example(world, session, settings):
         department_id=w.north.id,
         business_date=d(15),
     )
-    await payroll.confirm_payout(session, w.manager, settings, payout1.id)
+    await payroll.confirm_payout(session, w.owner, settings, payout1.id)
     await payroll.close_period(session, w.owner, settings, p1.id)
 
     await op(w, settings, w.ivan, w.delivery, "30", d(17))
@@ -100,7 +100,7 @@ async def test_ivan_statement_example(world, session, settings):
         business_date=d(20),
         department_id=w.north.id,
     )
-    await payroll.confirm_payout(session, w.manager, settings, advance.id)
+    await payroll.confirm_payout(session, w.owner, settings, advance.id)
     await op(w, settings, w.ivan, w.delivery, "2", d(26), confirm=False)
 
     p2 = await ledger.period_for_date(session, d(20), settings)
@@ -217,10 +217,12 @@ async def test_payout_cannot_exceed_balance(world, session, settings):
         kind="advance",
         idempotency_key=key(),
     )
-    strict = dataclasses.replace(settings, allow_self_confirm=False)
+    # Подтвердить выплату может только владелец, даже если её регистрировал бухгалтер сам.
     with pytest.raises(AccessDenied):
-        await payroll.confirm_payout(session, w.accountant, strict, p.id)
-    await payroll.confirm_payout(session, w.manager, strict, p.id)
+        await payroll.confirm_payout(session, w.accountant, settings, p.id)
+    with pytest.raises(AccessDenied):
+        await payroll.confirm_payout(session, w.manager, settings, p.id)
+    await payroll.confirm_payout(session, w.owner, settings, p.id)
     assert (await ledger.balances(session, w.petr.id))["USD"] == D("100")
 
 
@@ -283,7 +285,7 @@ async def test_payout_request_flow(world, session, settings):
         )
     req, payout = await payroll.decide_request(session, w.accountant, settings, req.id, True)
     assert req.status == "approved" and payout.status == "registered" and payout.amount == D("300")
-    with pytest.raises(AccessDenied):  # выплата без подразделения — нужно глобальное право
+    with pytest.raises(AccessDenied):  # подтвердить выплату может только владелец
         await payroll.confirm_payout(session, w.manager, settings, payout.id)
     await payroll.confirm_payout(session, w.owner, settings, payout.id)
     assert (await ledger.balances(session, w.ivan.id))["USD"] == D("200")
@@ -306,7 +308,7 @@ async def test_close_period_and_guards(world, session, settings):
 
     # Подтверждение операции из закрытого периода уходит в открытый период с исходной датой
     late = (await work.list_entries(session, employee_id=w.ivan.id, statuses=("pending",)))[0][0]
-    _, posted, _ = await work.confirm_entry(session, w.manager, settings, late.id)
+    _, posted, _ = await work.confirm_entry(session, w.owner, settings, late.id)
     p2 = await ledger.period_for_date(session, d(20), settings)
     assert posted.period_id == p2.id and posted.business_date == d(11)
     await session.commit()

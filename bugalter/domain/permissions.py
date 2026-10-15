@@ -39,7 +39,7 @@ PERM_TITLES: dict[str, str] = {
     Perm.TARIFF_MANAGE: "тарифы",
     Perm.TARIFF_BACKDATE: "тарифы задним числом",
     Perm.WORK_CREATE: "ввод операций",
-    Perm.WORK_CONFIRM: "подтверждение операций",
+    Perm.WORK_CONFIRM: "подтверждение операций (только владелец)",
     Perm.WORK_CANCEL: "отмена подтверждённых операций",
     Perm.WORK_VIEW: "просмотр операций подразделения",
     Perm.STOCK_MANAGE: "номенклатура и единицы",
@@ -50,7 +50,7 @@ PERM_TITLES: dict[str, str] = {
     Perm.PAYROLL_ADJUST: "выписка премий, штрафов, удержаний",
     Perm.PAYROLL_SIGN: "подпись премий, штрафов, удержаний",
     Perm.PAYROLL_PAYOUT: "регистрация выплат",
-    Perm.PAYROLL_PAYOUT_CONFIRM: "подтверждение выплат",
+    Perm.PAYROLL_PAYOUT_CONFIRM: "подтверждение выплат (только владелец)",
     Perm.PERIOD_CLOSE: "закрытие расчётного периода",
     Perm.PERIOD_REOPEN: "переоткрытие периода (только владелец)",
     Perm.REPORT_VIEW: "отчёты",
@@ -59,7 +59,9 @@ PERM_TITLES: dict[str, str] = {
 
 ALL_PERMS: frozenset[str] = frozenset(p.value for p in Perm)
 # Эти права может иметь только роль owner: их нельзя включить в другую роль или выдать через неё.
-OWNER_ONLY_PERMS: frozenset[str] = frozenset({Perm.ROLE_MANAGE, Perm.PERIOD_REOPEN})
+OWNER_ONLY_PERMS: frozenset[str] = frozenset(
+    {Perm.ROLE_MANAGE, Perm.PERIOD_REOPEN, Perm.WORK_CONFIRM, Perm.PAYROLL_PAYOUT_CONFIRM}
+)
 
 OWNER_ROLE = "owner"
 
@@ -71,7 +73,6 @@ DEFAULT_ROLES: dict[str, tuple[str, frozenset[str]]] = {
         frozenset(
             {
                 Perm.WORK_CREATE,
-                Perm.WORK_CONFIRM,
                 Perm.WORK_CANCEL,
                 Perm.WORK_VIEW,
                 Perm.STOCK_OPERATE,
@@ -81,7 +82,6 @@ DEFAULT_ROLES: dict[str, tuple[str, frozenset[str]]] = {
                 Perm.PAYROLL_ADJUST,
                 Perm.PAYROLL_SIGN,
                 Perm.PAYROLL_PAYOUT,
-                Perm.PAYROLL_PAYOUT_CONFIRM,
                 Perm.TARIFF_MANAGE,
                 Perm.REPORT_VIEW,
                 Perm.REPORT_EXPORT,
@@ -110,7 +110,6 @@ DEFAULT_ROLES: dict[str, tuple[str, frozenset[str]]] = {
             {
                 Perm.PAYROLL_ADJUST,
                 Perm.PAYROLL_PAYOUT,
-                Perm.PAYROLL_PAYOUT_CONFIRM,
                 Perm.REPORT_VIEW,
                 Perm.REPORT_EXPORT,
             }

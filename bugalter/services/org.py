@@ -159,6 +159,16 @@ async def set_employee_active(session: AsyncSession, actor, employee: Employee, 
     await audit(session, actor.user.id, "org.employee_active", "employee", employee.id, {"active": active})
 
 
+async def set_employee_position(session: AsyncSession, actor, employee: Employee, position: str | None) -> None:
+    """Должность — то, что видят в рабочей группе вместо имени (ФИО остаётся только в карточке)."""
+    await _require_org_for_employee(session, actor, employee)
+    position = (position or "").strip() or None
+    if position and len(position) > 64:
+        raise ValidationError("Должность - до 64 символов")
+    employee.position = position
+    await audit(session, actor.user.id, "org.employee_position", "employee", employee.id, {"position": position})
+
+
 async def _require_org_for_employee(session: AsyncSession, actor, employee: Employee) -> None:
     if actor.can(Perm.ORG_MANAGE):
         return

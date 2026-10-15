@@ -37,7 +37,7 @@ async def op(w, settings, emp, wt, qty, day, confirm=True, coefs=None):
         )
     ).entry
     if confirm:
-        await work.confirm_entry(w.session, w.manager, settings, entry.id)
+        await work.confirm_entry(w.session, w.owner, settings, entry.id)
     return entry
 
 
@@ -105,8 +105,8 @@ async def test_tiers_are_assigned_by_confirmation_order(world, session, settings
     a = await op(w, settings, w.ivan, w.delivery, "8", d(17), confirm=False)
     b = await op(w, settings, w.ivan, w.delivery, "8", d(17), confirm=False)
     assert a.amount == b.amount == D(3200)  # предварительно — от нуля
-    await work.confirm_entry(session, w.manager, settings, b.id)
-    await work.confirm_entry(session, w.manager, settings, a.id)
+    await work.confirm_entry(session, w.owner, settings, b.id)
+    await work.confirm_entry(session, w.owner, settings, a.id)
     assert b.amount == D(3200)
     assert a.amount == D(2 * 400 + 6 * 500)
 
@@ -263,7 +263,7 @@ async def test_advance_on_credit_and_repayment(world, session, settings):
         kind="advance",
         idempotency_key=key(),
     )
-    await payroll.confirm_payout(session, w.manager, settings, adv.id)
+    await payroll.confirm_payout(session, w.owner, settings, adv.id)
     assert (await ledger.balances(session, w.petr.id))["USD"] == D(-600)
     with pytest.raises(InsufficientFunds, match="долг"):
         await payroll.register_payout(

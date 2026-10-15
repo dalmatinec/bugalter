@@ -81,7 +81,7 @@ async def test_operation_amount_snapshot_survives_tariff_change(world, session, 
     await setup_delivery_tariffs(w)
     res = await create(w, settings, w.ivan, w.delivery, "3", d(16))
     assert res.entry.rate == D("400") and res.entry.amount == D("1200.00")
-    await work.confirm_entry(session, w.manager, settings, res.entry.id)
+    await work.confirm_entry(session, w.owner, settings, res.entry.id)
     await w.tariff(w.delivery, "999", d(15), dept=w.north, employees=[w.ivan], actor=w.owner)
     await session.refresh(res.entry)
     assert res.entry.amount == D("1200.00")
@@ -93,7 +93,7 @@ async def test_backdated_tariff_reprices_only_unconfirmed(world, session, settin
     w = world
     await w.tariff(w.packing, "20", d(1), dept=w.north)
     confirmed = (await create(w, settings, w.petr, w.packing, "2", d(10))).entry
-    await work.confirm_entry(session, w.manager, settings, confirmed.id)
+    await work.confirm_entry(session, w.owner, settings, confirmed.id)
     pending = (await create(w, settings, w.petr, w.packing, "2", d(12))).entry
     _, repriced = await work.add_tariffs(
         session,
@@ -177,19 +177,20 @@ async def test_confirm_posts_once(world, session, settings):
     w = world
     await setup_delivery_tariffs(w)
     entry = (await create(w, settings, w.ivan, w.delivery, "2", d(16))).entry
-    _, posted, changed = await work.confirm_entry(session, w.manager, settings, entry.id)
+    _, posted, changed = await work.confirm_entry(session, w.owner, settings, entry.id)
     assert changed and posted.amount == D("800.00")
-    _, posted2, changed2 = await work.confirm_entry(session, w.manager, settings, entry.id)
+    _, posted2, changed2 = await work.confirm_entry(session, w.owner, settings, entry.id)
     assert not changed2 and posted2 is None
     assert (await ledger.balances(session, w.ivan.id)) == {"USD": D("800.00")}
 
 
 async def test_concurrent_confirm_single_accrual(world, sessionmaker, session, settings):
-    """Два руководителя одновременно нажимают «Подтвердить»: начисление одно."""
+    """Два владельца (их может быть несколько в OWNER_TELEGRAM_IDS) одновременно жмут «Подтвердить»: начисление одно."""
     w = world
     await setup_delivery_tariffs(w)
     entry = (await create(w, settings, w.ivan, w.delivery, "1", d(16))).entry
-    manager2 = await w.grant(await w.actor_for(21, "Второй руководитель"), "manager", w.north)
+    await access.ensure_owner(session, 21)
+    owner2 = await w.actor_for(21, "Второй владелец")
     await session.commit()
 
     async def confirm(user):
@@ -198,7 +199,7 @@ async def test_concurrent_confirm_single_accrual(world, sessionmaker, session, s
             _, _, changed = await work.confirm_entry(s, actor, settings, entry.id)
         return changed
 
-    results = await asyncio.gather(confirm(w.manager.user), confirm(manager2.user))
+    results = await asyncio.gather(confirm(w.owner.user), confirm(owner2.user))
     assert sorted(results) == [False, True]
     count = (await session.execute(select(func.count()).select_from(LedgerEntry))).scalar_one()
     assert count == 1
@@ -210,27 +211,19 @@ async def test_confirm_rules(world, session, settings):
     entry = (await create(w, settings, w.ivan, w.delivery, "1", d(16))).entry
     with pytest.raises(AccessDenied):
         await work.confirm_entry(session, w.operator, settings, entry.id)  # нет права
-    # Руководитель — сам исполнитель операции
+    with pytest.raises(AccessDenied):
+        await work.confirm_entry(session, w.manager, settings, entry.id)  # подтверждение — только владелец
+    # Владельцу можно подтвердить даже запись о работе руководителя (единственное исключение «не в свою пользу»)
     await w.tariff(w.processing, "50", d(1), dept=w.north)
     own = (await create(w, settings, w.anna_emp, w.processing, "1", d(16))).entry
-    with pytest.raises(AccessDenied, match="свою пользу"):
-        await work.confirm_entry(session, w.manager, settings, own.id)
-    await work.confirm_entry(session, w.owner, settings, own.id)  # владельцу можно
-    # Автор = подтверждающий при выключенной настройке
-    import dataclasses
-
-    strict = dataclasses.replace(settings, allow_self_confirm=False)
-    authored = (await create(w, settings, w.ivan, w.delivery, "1", d(16), actor=w.manager)).entry
-    with pytest.raises(AccessDenied, match="allow_self_confirm"):
-        await work.confirm_entry(session, w.manager, strict, authored.id)
-    await work.confirm_entry(session, w.manager, settings, authored.id)
+    await work.confirm_entry(session, w.owner, settings, own.id)
 
 
 async def test_cancel_confirmed_creates_reversal(world, session, settings):
     w = world
     await setup_delivery_tariffs(w)
     entry = (await create(w, settings, w.ivan, w.delivery, "1", d(16))).entry
-    await work.confirm_entry(session, w.manager, settings, entry.id)
+    await work.confirm_entry(session, w.owner, settings, entry.id)
     with pytest.raises(ValidationError, match="причина"):
         await work.cancel_entry(session, w.manager, settings, entry.id, "")
     _, reversal = await work.cancel_entry(session, w.manager, settings, entry.id, "дубль")
@@ -245,7 +238,7 @@ async def test_db_forbids_editing_confirmed_entry_and_ledger(world, session, set
     w = world
     await setup_delivery_tariffs(w)
     entry = (await create(w, settings, w.ivan, w.delivery, "1", d(16))).entry
-    await work.confirm_entry(session, w.manager, settings, entry.id)
+    await work.confirm_entry(session, w.owner, settings, entry.id)
     await session.commit()
     with pytest.raises(DBAPIError, match="нельзя изменить"):
         await session.execute(text("UPDATE work_entries SET amount = 1 WHERE id = :id"), {"id": entry.id})
