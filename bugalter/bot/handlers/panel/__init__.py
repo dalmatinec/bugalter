@@ -7,6 +7,7 @@ from aiogram import Router
 
 from . import (
     access,
+    backups,
     coefficients,
     departments,
     employees,
@@ -34,6 +35,7 @@ router.include_routers(
     products.router,
     groups.router,
     settings.router,
+    backups.router,
     departments.router,
     journal.router,
     forms.router,

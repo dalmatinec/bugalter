@@ -568,3 +568,21 @@ async def test_payouts_panel_advance_and_salary(h, session):
     # Повторное нажатие той же кнопки ничего не выплачивает
     await h.press(OWNER, ok)
     assert any("нечего" in a for a in h.tg.alerts())
+
+
+async def test_backups_screen(h, session, tmp_path):
+    from bugalter.bot.handlers.panel import backups
+
+    await setup_company(h, session)
+    h.config.backup_dir = str(tmp_path)
+    (tmp_path / "bk_1510_0800.dump").write_bytes(b"dump")
+    out = texts(await h.press(OWNER, "p:bk"))
+    assert "bk_1510_0800.dump" in out and "3 раза в сутки" in out
+    out = await h.press(OWNER, "p:bk:get")
+    assert any(isinstance(c, SendDocument) and c.chat_id == OWNER for c in out)
+    await h.press(OWNER, "p:bk:now")
+    assert (tmp_path / ".now").exists()  # заявку забирает контейнер backup
+    for task in list(backups._waiting):
+        task.cancel()
+    await h.press(IVAN, "p:bk")
+    assert any("только владельцу" in a for a in h.tg.alerts())

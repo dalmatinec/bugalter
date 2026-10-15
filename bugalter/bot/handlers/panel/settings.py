@@ -79,7 +79,7 @@ async def settings_view(settings):
     rows = [
         [("💱 Валюта", "p:s:cur"), ("🕐 Часовой пояс", "p:s:tz")],
         [("📅 Периоды", "p:s:split"), ("🔢 Округление", "p:s:rnd")],
-        [("📉 Лимит удержаний", "p:s:lim")],
+        [("📉 Лимит удержаний", "p:s:lim"), ("💾 Бэкап", "p:bk")],
     ]
     toggles = [
         (f"{'✅' if getattr(settings, key) else '⬜️'} {short}", f"p:s:t:{key}") for key, (_, short) in TOGGLES.items()

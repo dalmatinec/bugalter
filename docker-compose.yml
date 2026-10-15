@@ -20,6 +20,9 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-bugalter}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-bugalter}
+      BACKUP_DIR: /backups
+    volumes:
+      - ./backups:/backups
     depends_on:
       db:
         condition: service_healthy
@@ -32,8 +35,9 @@ services:
       PGDATABASE: ${POSTGRES_DB:-bugalter}
       PGUSER: ${POSTGRES_USER:-bugalter}
       PGPASSWORD: ${POSTGRES_PASSWORD}
-      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
-      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      # 3 копии в сутки, хранятся 3 последние: новая заменяет самую старую
+      BACKUP_KEEP: ${BACKUP_KEEP:-3}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-28800}
     volumes:
       - ./backups:/backups
       - ./scripts/backup.sh:/backup.sh:ro

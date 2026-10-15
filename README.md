@@ -55,11 +55,11 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 bugalter/
   domain/     деньги (Decimal, округление), даты и периоды, права, разбор тегов, ошибки — без БД и Telegram
   db/         модели SQLAlchemy
-  services/   бизнес-логика: access, org, tariffs, work, ledger, payroll, stock, reports, settings, audit
+  services/   бизнес-логика: access, org, tariffs, work, fixed_salary, ledger, payroll, stock, reports, settings
   bot/        aiogram: middleware (транзакция на действие, молчание для чужих), карточки, хранилище состояний
     handlers/
       common.py   /start, /help
-      panel/      Управление: один модуль на раздел (employees, works, groups, settings, products, access, …)
+      panel/      Управление: один модуль на раздел (employees, payouts, works, groups, settings, backups, …)
       tags.py     отчёт о работе тегами в группе
       work.py     ввод и подтверждение работы (/op, кнопки карточки)
       me.py       личное меню сотрудника
@@ -68,5 +68,5 @@ bugalter/
       reports.py  отчёты
 migrations/   Alembic, включая триггеры защиты данных
 tests/        pytest (сервисы, индексы, сквозные сценарии бота)
-scripts/      backup.sh, update.sh, restore.sh
+scripts/      backup.sh (3 копии в сутки, заявки из бота), update.sh, restore.sh
 ```

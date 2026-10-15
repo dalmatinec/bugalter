@@ -1,10 +1,10 @@
 #!/bin/sh
-# Восстановление базы из резервной копии:  sh scripts/restore.sh backups/bugalter_YYYYMMDD_HHMMSS.dump
+# Восстановление базы из резервной копии:  sh scripts/restore.sh backups/bk_1510_0800.dump
 # Текущая база не удаляется: она переименовывается в <имя>_before_restore_<время>.
 set -eu
 cd "$(dirname "$0")/.."
 
-DUMP="${1:?Укажите файл копии: sh scripts/restore.sh backups/bugalter_....dump}"
+DUMP="${1:?Укажите файл копии: sh scripts/restore.sh backups/bk_....dump}"
 [ -f "$DUMP" ] || { echo "Нет файла $DUMP"; exit 1; }
 
 env_value() { grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- ; }

@@ -20,6 +20,8 @@ class Config(BaseSettings):
     telegram_proxy: str | None = Field(default=None, alias="TELEGRAM_PROXY")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=True, alias="LOG_JSON")
+    # Папка с резервными копиями (общая с контейнером backup): бот отдаёт копии и принимает файл для восстановления.
+    backup_dir: str = Field(default="/backups", alias="BACKUP_DIR")
 
     @field_validator("owner_ids_raw", mode="before")
     @classmethod
