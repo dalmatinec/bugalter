@@ -105,3 +105,16 @@ def test_parse_tag_report():
     assert [(i.tag, i.qty) for i in report.items] == [("фасовка05", "20"), ("доставка1", "3"), ("доставка", "1")]
     assert report.date_token == "вчера" and report.comment == "у клиента"
     assert work_tag("Фасовка 0,5") == "фасовка05" and work_tag("Доставка") == "доставка"
+
+
+def test_parse_block_report():
+    from bugalter.domain.tags import parse_block_report
+
+    report = parse_block_report('"Готовые крам"\n5х05\n10 x 1\nГотовые специи\n7х0,5\nвчера')
+    assert [(i.tag, i.qty) for i in report.items] == [
+        ("готовыекрам05", "5"),
+        ("готовыекрам1", "10"),
+        ("готовыеспеции05", "7"),
+    ]
+    assert report.date_token == "вчера" and report.comment is None
+    assert parse_block_report("Привет\nкак дела").items == []

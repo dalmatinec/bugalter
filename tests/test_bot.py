@@ -684,3 +684,38 @@ async def test_product_pack_excludes_base_unit(h, session):
     markup = next(c.reply_markup for c in out if isinstance(c, EditMessageText))
     codes = [b.text for row in markup.inline_keyboard for b in row]
     assert "кг" not in codes and "уп" not in codes and "кор" in codes
+
+
+async def test_block_report_in_group(h, session):
+    """Отчёт столбиком: название, под ним «количество х вес». Оператор подтверждает кнопкой."""
+    dept, _ = await setup_company(h, session)
+    owner = await access.load_actor(session, OWNER)
+    settings = await get_settings(session)
+    for name, rate in (("Готовые крам 0.5", "100"), ("Готовые крам 1", "180"), ("Готовые специи 0.5", "90")):
+        wt = await tariffs.create_work_type(
+            session, owner, await org.unique_code(session, WorkType.code, name), "шт", "per_unit", name
+        )
+        await work.add_tariffs(
+            session,
+            owner,
+            settings,
+            work_type=wt,
+            rate=Decimal(rate),
+            currency="USD",
+            department=dept,
+            employees=None,
+            valid_from=None,
+        )
+    await session.commit()
+
+    # Обычная переписка в несколько строк: бот молчит
+    assert texts(await h.say(IVAN, "Привет\nзавтра буду позже", GROUP)) == ""
+
+    out = await h.say(IVAN, '"Готовые крам"\n5х05\n10х1\nГотовые специи\n7х05\n13х1', GROUP)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
+    assert "Готовые крам 0.5 × 5 шт" in card.text and "Готовые крам 1 × 10 шт" in card.text
+    assert "Готовые специи 0.5 × 7 шт" in card.text
+    assert "Не нашёл работу: Готовые специи 1" in card.text
+    out = await h.press(OPERATOR, card.reply_markup.inline_keyboard[0][0].callback_data, GROUP)
+    emp_id = (await session.execute(select(WorkEntry))).scalars().first().employee_id
+    assert await ledger.balances(session, emp_id) == {"USD": Decimal("2930.0000")}

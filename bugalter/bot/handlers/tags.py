@@ -1,6 +1,7 @@
 """Отчёт о работе тегами в рабочей группе.
 
-Сотрудник пишет в своей группе «#доставка 3» или несколько тегов сразу. Бот находит работу по тегу,
+Сотрудник пишет в своей группе «#доставка 3» или несколько тегов сразу, либо столбиком:
+название работы, под ним строки «5х05» (5 штук по 0,5). Бот находит работу по тегу,
 считает по цене из Работ и цен и присылает одну карточку на весь отчёт с кнопками для подтверждения.
 В группе сотрудника работа записывается на него, кто бы ни написал (он сам, оператор или владелец).
 В общей группе - на того, кто написал, если он сотрудник.
@@ -14,7 +15,7 @@ from ...db.models import Employee, Unit, User, WorkEntry, WorkType
 from ...domain.dates import parse_date
 from ...domain.errors import ValidationError
 from ...domain.money import fmt_qty, parse_decimal
-from ...domain.tags import parse_tag_report
+from ...domain.tags import parse_block_report, parse_tag_report
 from ...services import org, tariffs, work
 from ...services.work import STATUS_TITLES
 from .. import ui
@@ -50,8 +51,8 @@ async def report_card(session, entries: list[WorkEntry], show_amount: bool, unkn
     if entries[0].comment:
         lines.append(f"💬 {h(entries[0].comment)}")
     if unknown:
-        tags = ", ".join(f"#{h(t)}" for t in unknown)
-        lines.append(f"❓ Не нашёл работу для {tags}. Теги видны в Управлении, Работы и цены.")
+        names = ", ".join(h(t) for t in unknown)
+        lines.append(f"❓ Не нашёл работу: {names}. Названия и теги видны в Управлении, Работы и цены.")
     lines.append(f"✍️ прислал: {h(await ui.actor_label(session, entries[0].created_by))}")
     return "\n".join(lines)
 
@@ -68,22 +69,33 @@ def report_kb(chat_id: int, message_id: int, entries: list[WorkEntry]) -> Inline
 
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.text.regexp(r"^\s*#\w"))
 async def tag_report(message: Message, session, actor, settings, chat_dept, chat_employee, notifier):
-    if chat_dept is None:
-        return
     report = parse_tag_report(message.text)
+    await _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier)
+
+
+@router.message(F.chat.type.in_({"group", "supergroup"}), F.text.contains("\n"), ~F.text.startswith("/"))
+async def block_report(message: Message, session, actor, settings, chat_dept, chat_employee, notifier):
+    """Отчёт столбиком: «Готовые крам» и под ним «5х05», «10х1»."""
+    report = parse_block_report(message.text)
+    await _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier)
+
+
+async def _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier):
+    if chat_dept is None or not report.items:
+        return
     by_tag = await tariffs.work_types_by_tag(session)
     found = [(by_tag.get(tariffs.work_tag(item.tag)), item) for item in report.items]
     if all(wt is None for wt, _ in found):
-        return  # чужие хэштеги, не наш отчёт
+        return  # обычная переписка или чужие хэштеги, не наш отчёт
     employee = await _reporter(session, actor, chat_dept, chat_employee)
     performed_on = parse_date(report.date_token, settings.today()) if report.date_token else None
     results, unknown = [], []
     for index, (wt, item) in enumerate(found):
         if wt is None:
-            unknown.append(item.tag)
+            unknown.append(item.label or f"#{item.tag}")
             continue
         unit = await session.get(Unit, wt.unit_code)
-        qty = parse_decimal(item.qty, max_scale=unit.scale, what=f"количество для #{item.tag}")
+        qty = parse_decimal(item.qty, max_scale=unit.scale, what=f"количество для {item.label or '#' + item.tag}")
         results.append(
             await work.create_entry(
                 session,
