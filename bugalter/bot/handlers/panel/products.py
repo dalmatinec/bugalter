@@ -1,4 +1,6 @@
-"""Товары: номенклатура для склада, единица учёта и фасовки (уп, коробка)."""
+"""Товары: номенклатура для склада, единица учёта (гр, кг, шт) и фасовка, например 1 шт = 20 гр."""
+
+import re
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -15,7 +17,10 @@ from .base import ask, cancel_kb, form, kb, rate_text, show
 router = Router(name="panel.products")
 
 # В чём считать товар на складе и как называть упаковку. Единицы для работ (заказ, час) здесь не нужны.
-STOCK_UNITS = ("шт", "кг", "г", "л", "уп", "кор", "мешок", "пачка")
+STOCK_UNITS = ("г", "кг", "шт")
+UNIT_LABELS = {"г": "гр"}
+# «Крам 20G», «Кофе 250 гр», «Мука 1кг»: вес одной пачки прямо в названии.
+_WEIGHT_IN_NAME = re.compile(r"(\d+(?:[.,]\d+)?)\s*(g|г|гр|kg|кг)\b", re.IGNORECASE)
 
 
 async def products_view(session):
@@ -67,15 +72,17 @@ async def product_add(callback: CallbackQuery, state: FSMContext, actor, notifie
 async def form_product_name(message, state, session, notifier, **_):
     name = " ".join(message.text.split())
     await state.update_data(product_name=name)
-    units = [(code, f"p:pr:u:{code}") for code in await _stock_units(session)]
-    grid = [units[i : i + 4] for i in range(0, len(units), 4)]
-    grid.append([("✖️ Отмена", "p:pr")])
-    notifier.answer(
-        message,
-        f"{h(name)}: в чём считать остаток на складе? Например кофе в кг или г, бутылки в шт.\n"
-        "Упаковку (уп, коробку) можно добавить потом кнопкой Фасовка.",
-        kb(grid),
-    )
+    units = [(UNIT_LABELS.get(code, code), f"p:pr:u:{code}") for code in await _stock_units(session)]
+    grid = [units, [("✖️ Отмена", "p:pr")]]
+    text = f"{h(name)}: в чём считать остаток на складе? гр, кг или шт."
+    if match := _WEIGHT_IN_NAME.search(name):
+        text += (
+            f"\n\n💡 В названии вес {h(match.group(0))}. Если это готовая пачка такого веса, "
+            "считайте в <b>шт</b>: так проще пересчитывать."
+        )
+    else:
+        text += "\nНапример сырьё на вес в гр или кг, готовые пачки в шт."
+    notifier.answer(message, text, kb(grid))
 
 
 async def _stock_units(session) -> list[str]:
@@ -102,14 +109,17 @@ async def product_pack(callback: CallbackQuery, session, notifier):
     product = await session.get(Product, product_id)
     have = {u.unit_code for u in dict(await stock.list_products(session)).get(product, [])}
     codes = [c for c in await _stock_units(session) if c != product.base_unit and c not in have]
-    units = [(code, f"p:pr:pu:{product_id}:{code}") for code in codes]
-    grid = [units[i : i + 4] for i in range(0, len(units), 4)]
+    units = [(UNIT_LABELS.get(code, code), f"p:pr:pu:{product_id}:{code}") for code in codes]
+    if not units:
+        raise ValidationError("Все фасовки для этого товара уже заданы")
+    grid = [units]
     grid.append([("⬅️ Назад", f"p:pr:v:{product_id}")])
     show(
         callback,
         notifier,
-        f"Фасовка: упаковка, в которой {h(product.name)} приходит или выдаётся. Тогда можно писать "
-        f"не 750 {h(product.base_unit)}, а 3 уп.\nКак называется упаковка?",
+        f"Фасовка нужна, только если {h(product.name)} приходит или выдаётся не в {h(product.base_unit)}.\n"
+        f"Например считаете в гр, а привозят пачками по 20 гр: выберите шт и напишите 20. "
+        f"Тогда можно писать не 600 гр, а 30 шт.\nНе нужно? Нажмите Назад.",
         kb(grid),
     )
 
@@ -122,8 +132,8 @@ async def product_pack_unit(callback: CallbackQuery, state: FSMContext, session,
     show(
         callback,
         notifier,
-        f"Сколько {h(product.base_unit)} в 1 {h(unit)}? Например, если в упаковке 250 {h(product.base_unit)}, "
-        "напишите <b>250</b>",
+        f"Сколько {h(product.base_unit)} в 1 {h(unit)}? Например, если в пачке 20 {h(product.base_unit)}, "
+        "напишите <b>20</b>",
         cancel_kb(f"p:pr:v:{product.id}"),
     )
 

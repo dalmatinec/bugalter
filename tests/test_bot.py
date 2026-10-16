@@ -694,7 +694,7 @@ async def test_product_pack_excludes_base_unit(h, session):
     out = await h.press(OWNER, f"p:pr:pk:{coffee.id}")
     markup = next(c.reply_markup for c in out if isinstance(c, EditMessageText))
     codes = [b.text for row in markup.inline_keyboard for b in row]
-    assert "кг" not in codes and "уп" not in codes and "кор" in codes
+    assert "кг" not in codes and "гр" in codes and "шт" in codes and "кор" not in codes
 
 
 async def test_block_report_in_group(h, session):
@@ -894,3 +894,13 @@ async def test_report_mistakes_delete_and_undo(h, session):
     assert await ledger.balances(session, emp.id) == {"USD": Decimal("800.0000")}
     await h.press(OWNER, undo, GROUP)
     assert await ledger.balances(session, emp.id) == {"USD": Decimal("0.0000")}
+
+
+async def test_product_units_and_weight_hint(h, session):
+    await setup_company(h, session)
+    await h.press(OWNER, "p:pr:add")
+    out = await h.say(OWNER, "Крам 20G")
+    msg = next(c for c in out if isinstance(c, SendMessage))
+    labels = [b.text for row in msg.reply_markup.inline_keyboard for b in row]
+    assert labels[:3] == ["гр", "кг", "шт"]
+    assert "В названии вес 20G" in msg.text
