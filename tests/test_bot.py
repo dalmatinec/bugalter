@@ -498,9 +498,8 @@ async def test_admin_panel_simple_setup(h, session):
 
     # Товар — в «Ещё»
     await h.press(OWNER, "p:pr:add")
-    await h.say(OWNER, "Кофе зерно")
-    out = texts(await h.press(OWNER, "p:pr:u:кг"))
-    assert "Кофе зерно" in out
+    out = texts(await h.say(OWNER, "Кофе зерно"))
+    assert "Товар добавлен: <b>Кофе зерно</b>" in out
 
 
 async def test_tag_report_in_group(h, session):
@@ -906,20 +905,30 @@ async def test_report_mistakes_delete_and_undo(h, session):
     assert await ledger.balances(session, emp.id) == {"USD": Decimal("0.0000")}
 
 
-async def test_product_units_and_weight_hint(h, session):
-    """Вес в названии: товар сохраняется как написали, без вопросов. Без веса спрашиваем гр, кг или шт."""
-    await setup_company(h, session)
+async def test_product_saved_as_written_and_deleted(h, session):
+    """Товар сохраняется как написали, без вопросов. Удаляется кнопкой; с историей скрывается."""
+    dept, emp = await setup_company(h, session)
     await h.press(OWNER, "p:pr:add")
-    out = texts(await h.say(OWNER, "Крам 20г"))
-    assert "Товар добавлен: <b>Крам 20г</b>" in out
-    assert (await stock.get_product(session, "Крам 20г")).base_unit == "шт"
+    out = texts(await h.say(OWNER, "крам 20"))
+    assert "Товар добавлен: <b>крам 20</b>" in out and "артикул" not in out
+    kram = await stock.get_product(session, "крам 20")
+    assert kram.base_unit == "ед"
+    await h.press(OWNER, f"p:st:ip:{dept.id}:{kram.id}")
+    out = texts(await h.say(OWNER, "13"))
+    assert "на складе: <b>13</b>" in out  # без единицы, как записали
+
+    # Остаток есть: удалить нельзя
+    await h.press(OWNER, f"p:pr:dly:{kram.id}")
+    assert any("Сначала верните или спишите" in a for a in h.tg.alerts())
+    # Новый товар без истории удаляется совсем
     await h.press(OWNER, "p:pr:add")
-    out = await h.say(OWNER, "Трюфель")
-    msg = next(c for c in out if isinstance(c, SendMessage))
-    labels = [b.text for row in msg.reply_markup.inline_keyboard for b in row]
-    assert labels[:3] == ["гр", "кг", "шт"]
-    out = texts(await h.press(OWNER, "p:pr:u:г"))
-    assert "Товар добавлен: <b>Трюфель</b>" in out
+    await h.say(OWNER, "Трюфель")
+    truffle = await stock.get_product(session, "Трюфель")
+    out = texts(await h.press(OWNER, f"p:pr:dl:{truffle.id}"))
+    assert "Удалить товар <b>Трюфель</b>?" in out
+    out = texts(await h.press(OWNER, f"p:pr:dly:{truffle.id}"))
+    assert "<b>Трюфель</b>" not in out
+    assert await stock.get_product(session, "Трюфель", required=False) is None
 
 
 async def test_product_stats_and_expenses(h, session):

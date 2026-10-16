@@ -56,8 +56,39 @@ async def product_view(session, product_id: int):
             lines.append(f"• {h(row.location_title)}: {fmt_qty(row.qty, u)}")
     if len(lines) == 2:
         lines.append("Сейчас нигде нет.")
-    rows = [[("📦 Склад: приход, выдача", "p:st")], [("⬅️ Товары", "p:pr")]]
+    rows = [
+        [("📦 Склад: приход, выдача", "p:st")],
+        [("🗑 Удалить товар", f"p:pr:dl:{product.id}")],
+        [("⬅️ Товары", "p:pr")],
+    ]
     return "\n".join(lines), kb(rows)
+
+
+@router.callback_query(F.data.startswith("p:pr:dl:"))
+async def product_delete_ask(callback: CallbackQuery, session, actor, notifier):
+    stock.require_catalog(actor)
+    product = await session.get(Product, int(callback.data.split(":")[3]))
+    show(
+        callback,
+        notifier,
+        f"🗑 Удалить товар <b>{h(product.name)}</b>?\n"
+        "Если по нему уже были приходы и выдачи, он просто пропадёт из списков, история останется.",
+        kb([[("🗑 Да, удалить", f"p:pr:dly:{product.id}"), ("✖️ Нет", f"p:pr:v:{product.id}")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("p:pr:dly:"))
+async def product_delete(callback: CallbackQuery, session, actor, notifier):
+    product = await session.get(Product, int(callback.data.split(":")[3]))
+    if product is None or not product.is_active:
+        notifier.toast(callback, "Уже удалён")
+        show(callback, notifier, *await products_view(session))
+        return
+    name = product.name
+    await stock.remove_product(session, actor, product)
+    await session.flush()
+    notifier.toast(callback, f"Удалён: {name}")
+    show(callback, notifier, *await products_view(session))
 
 
 def _month(code: str) -> dt.date:
@@ -109,18 +140,8 @@ async def product_add(callback: CallbackQuery, state: FSMContext, actor, notifie
 async def form_product_name(message, state, session, actor, notifier, **_):
     name = " ".join(message.text.split())
     await state.update_data(product_name=name)
-    if _WEIGHT_IN_NAME.search(name):
-        # Вес уже в названии («Крам 20г»): сохраняем как написали, ничего больше не спрашиваем.
-        await _create(message, state, session, actor, notifier, name, "шт")
-        return
-    units = [(UNIT_LABELS.get(code, code), f"p:pr:u:{code}") for code in await _stock_units(session)]
-    grid = [units, [("✖️ Отмена", "p:pr")]]
-    notifier.answer(
-        message,
-        f"{h(name)}: в чём считать? Если товар на вес, гр или кг. Если поштучно, шт.\n"
-        "<i>Подсказка: если написать вес в названии, например «Крам 20г», бот не будет спрашивать.</i>",
-        kb(grid),
-    )
+    # Сохраняем как написали («Крам 20г», «Трюфель»): ничего больше не спрашиваем.
+    await _create(message, state, session, actor, notifier, name, "ед")
 
 
 async def _create(event, state, session, actor, notifier, name: str, unit: str) -> None:

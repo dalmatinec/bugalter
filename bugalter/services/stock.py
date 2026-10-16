@@ -113,7 +113,7 @@ async def get_product(session: AsyncSession, sku: str, required: bool = True) ->
 
 
 async def list_products(session: AsyncSession) -> list[tuple[Product, list[ProductUnit]]]:
-    products = list((await session.execute(select(Product).order_by(Product.sku))).scalars())
+    products = list((await session.execute(select(Product).where(Product.is_active).order_by(Product.name))).scalars())
     units = list((await session.execute(select(ProductUnit))).scalars())
     by_product: dict[int, list[ProductUnit]] = {}
     for pu in units:
@@ -1136,9 +1136,33 @@ async def ensure_finished(session: AsyncSession, actor, goods: FinishedGoods, de
         return goods.product
     actor.require(Perm.STOCK_OPERATE, department_id)
     sku = await org.unique_code(session, Product.sku, goods.title)
-    product = Product(sku=sku, name=goods.title, base_unit="шт", category=goods.base.category if goods.base else None)
+    product = Product(sku=sku, name=goods.title, base_unit="ед", category=goods.base.category if goods.base else None)
     session.add(product)
     await session.flush()
     await audit(session, actor.user.id, "stock.product_create", "product", product.id, {"sku": sku, "auto": True})
     goods.product = product
     return product
+
+
+async def remove_product(session: AsyncSession, actor, product: Product) -> bool:
+    """Удаляет товар. С историей движений товар скрывается (история остаётся). True, если удалён совсем."""
+    require_catalog(actor)
+    left = await session.scalar(
+        select(func.coalesce(func.sum(func.abs(StockBalance.qty)), 0))
+        .join(Location, Location.id == StockBalance.location_id)
+        .where(StockBalance.product_id == product.id, Location.kind.notin_(tuple(VIRTUAL_LOCATION_KINDS)))
+    )
+    if left:
+        raise ValidationError("Товар ещё есть на складе или у сотрудников. Сначала верните или спишите остаток")
+    used = await session.scalar(
+        select(func.count()).select_from(StockDocumentLine).where(StockDocumentLine.product_id == product.id)
+    )
+    await audit(session, actor.user.id, "stock.product_remove", "product", product.id, {"hidden": bool(used)})
+    if used:
+        product.is_active = False
+        return False
+    for unit in (await session.execute(select(ProductUnit).where(ProductUnit.product_id == product.id))).scalars():
+        await session.delete(unit)
+    await session.delete(product)
+    await session.flush()
+    return True

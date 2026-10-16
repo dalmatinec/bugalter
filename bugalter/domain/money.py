@@ -141,4 +141,7 @@ def fmt_signed_money(value: Decimal, currency: str, minor_units: int = 2) -> str
 
 
 def fmt_qty(value: Decimal, unit: str) -> str:
+    # «ед»: товар считается как записали («Крам 20г» × 13), единицу не показываем.
+    if unit == "ед":
+        return fmt_number(value)
     return f"{fmt_number(value)} {unit}"
