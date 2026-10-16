@@ -334,13 +334,74 @@ async def finished_employee(callback: CallbackQuery, session, notifier):
     buttons = await _products_kb(session, int(dept_id), f"p:st:fp:{dept_id}:{emp_id}")
     if not buttons:
         raise ValidationError("Товаров пока нет. Сначала добавьте товар: Ещё, Товары")
+    markup = _grid(buttons, f"p:st:d:{dept_id}")
+    markup.inline_keyboard.insert(0, kb([[("📋 Вставить списком", f"p:st:fl:{dept_id}:{emp_id}")]]).inline_keyboard[0])
     show(
         callback,
         notifier,
-        f"📦 Какой товар сдаёт <b>{h(emp.full_name)}</b>?\n"
-        "Если готового товара нет в списке, добавьте его в Товарах, например <b>Крам готовый 0.5</b>.",
-        _grid(buttons, f"p:st:d:{dept_id}"),
+        f"📦 Что сдаёт <b>{h(emp.full_name)}</b>?\n"
+        "Быстрее всего списком: нажмите 📋 Вставить списком и пришлите, например\n"
+        "<code>Крам 05 13\nКрам 1 7\nТрюфель 05 4</code>\n(товар, вес, сколько штук).\n"
+        "Или выберите один товар ниже.",
+        markup,
     )
+
+
+@router.callback_query(F.data.startswith("p:st:fl:"))
+async def finished_list(callback: CallbackQuery, state: FSMContext, session, notifier):
+    _, _, _, dept_id, emp_id = callback.data.split(":")
+    emp = await session.get(Employee, int(emp_id))
+    await ask(state, "st_list", dept_id=int(dept_id), emp_id=emp.id, key=_new_key())
+    show(
+        callback,
+        notifier,
+        f"📋 Пришлите, что принимаете от <b>{h(emp.full_name)}</b>, каждую позицию с новой строки:\n"
+        "<code>Крам 05 13\nКрам 1 7\nТрюфель 05 4\nТрюфель 1 17</code>\n"
+        "05 и 1 это вес одной штуки, последнее число это сколько штук.\n"
+        "Готовый товар (например Крам 0.5) заведётся сам, если есть товар Крам.",
+        cancel_kb(f"p:st:d:{dept_id}"),
+    )
+
+
+@form("st_list")
+async def form_st_list(message, state, session, actor, settings, notifier, data, **_):
+    from ....domain.tags import parse_goods_list
+
+    dept = await session.get(Department, data["dept_id"])
+    emp = await session.get(Employee, data["emp_id"])
+    actor.require(Perm.STOCK_OPERATE, dept.id)
+    lines, other = parse_goods_list(message.text)
+    resolved = [(line, await stock.resolve_finished(session, line.name, line.weight)) for line in lines]
+    unknown = [line.text for line, g in resolved if g is None] + other
+    if unknown or not lines:
+        raise ValidationError(
+            "Не понял строки: "
+            + "; ".join(unknown or [message.text])
+            + ". Пишите товар, вес и количество: Крам 05 13. Товар должен быть в списке Товары"
+        )
+    done = []
+    for index, (line, goods) in enumerate(resolved):
+        product = await stock.ensure_finished(session, actor, goods, dept.id)
+        await stock.receive(
+            session,
+            actor,
+            key=f"{data['key']}:{index}",
+            department=dept,
+            product=product,
+            qty=parse_decimal(line.qty, what="количество"),
+            from_employee=emp,
+            comment=f"готовое от {emp.full_name}",
+            received_on=settings.today(),
+        )
+        done.append(f"• {h(goods.title)} × {h(line.qty)} шт")
+    await state.clear()
+    await session.flush()
+    text = f"📦 Принято на склад от {h(emp.full_name)}:\n" + "\n".join(done)
+    if emp.user_id:
+        user = await session.get(User, emp.user_id)
+        notifier.send(user.telegram_id, "📦 Склад принял у вас:\n" + "\n".join(done))
+    notifier.answer(message, text)
+    notifier.answer(message, *await stock_view(session, actor, dept.id))
 
 
 @router.callback_query(F.data.startswith("p:st:fp:"))
@@ -417,13 +478,15 @@ STOCK_HELP = """❓ <b>Как работать со складом</b>
 📤 Выдать, сотрудник, товар, количество. Сотруднику придёт кнопка Получено.
 Пока он не нажал, товар висит как 🚚 ждёт подтверждения.
 
-<b>3. Сотрудник сделал работу</b>
-Он пишет в своей группе, например <code>Крам факт 1 13</code> или <code>Готовые крам 4х05</code>.
+<b>3. Сотрудник сделал работу</b> (фасовка, факт, доставка)
+Он пишет в своей группе, например <code>#фасовка крам 1 40</code> или <code>Крам факт 0.5 13</code>.
 Оператор подтверждает кнопкой, и деньги идут сотруднику в зарплату.
-Факт: сделано здесь и сейчас. Готовые: приготовлено заранее, лежит и ждёт покупателя.
 
 <b>4. Сотрудник сдаёт готовое на склад</b>, чтобы покупатели могли забрать
-📦 Принять готовое, сотрудник, товар, сколько. Товар появится на складе.
+Сотрудник пишет в группе список: <code>Крам 05 13</code>, <code>Трюфель 1 17</code> (товар, вес, штук).
+Бот покажет карточку, оператор пересчитывает и нажимает ✅ Принять на склад.
+Или оператор сам: 📦 Принять готовое, сотрудник, 📋 Вставить списком.
+Готовый товар (Крам 0.5, Крам 1) заводится сам, если есть товар Крам.
 Сырьё, которое ушло на фасовку: ✂️ Израсходовано, тогда оно перестанет числиться на сотруднике.
 
 <b>5. Сотрудник вернул лишнее</b>

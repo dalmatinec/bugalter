@@ -1084,3 +1084,55 @@ async def verify_balances(session: AsyncSession) -> list[tuple[int, int, Decimal
         )
     ).all()
     return [tuple(r) for r in rows]
+
+
+# ------------------------------------------------------------------ сдача готового товара
+
+
+def weight_text(weight: str) -> str:
+    """«05» значит 0.5, «025» значит 0.25: так пишут вес без запятой."""
+    weight = weight.replace(",", ".")
+    if len(weight) > 1 and weight.startswith("0") and "." not in weight:
+        return "0." + weight[1:]
+    return weight
+
+
+def _name_tag(text: str) -> str:
+    return "".join(ch for ch in text.lower().replace("ё", "е") if ch.isalnum())
+
+
+@dataclass
+class FinishedGoods:
+    title: str  # «Крам 0.5»
+    product: Product | None  # None: такого готового товара ещё нет, заведётся при приёме
+    base: Product | None  # «Крам», от которого заводится «Крам 0.5»
+
+
+async def resolve_finished(session: AsyncSession, name: str, weight: str | None) -> FinishedGoods | None:
+    """Готовый товар по строке «Крам 05 13»: товар «Крам 0.5», а если его нет, то заведём от «Крам»."""
+    by_tag = {_name_tag(p.name): p for p, _ in await list_products(session)}
+    if weight is None:
+        product = by_tag.get(_name_tag(name))
+        return FinishedGoods(product.name, product, None) if product else None
+    title_weight = weight_text(weight)
+    exact = by_tag.get(_name_tag(f"{name} {title_weight}"))
+    if exact is not None:
+        return FinishedGoods(exact.name, exact, None)
+    base = by_tag.get(_name_tag(name))
+    if base is None:
+        return None
+    return FinishedGoods(f"{base.name} {title_weight}", None, base)
+
+
+async def ensure_finished(session: AsyncSession, actor, goods: FinishedGoods, department_id: int) -> Product:
+    """Заводит готовый товар «Крам 0.5» в штуках. Хватает права на складские движения."""
+    if goods.product is not None:
+        return goods.product
+    actor.require(Perm.STOCK_OPERATE, department_id)
+    sku = await org.unique_code(session, Product.sku, goods.title)
+    product = Product(sku=sku, name=goods.title, base_unit="шт", category=goods.base.category if goods.base else None)
+    session.add(product)
+    await session.flush()
+    await audit(session, actor.user.id, "stock.product_create", "product", product.id, {"sku": sku, "auto": True})
+    goods.product = product
+    return product

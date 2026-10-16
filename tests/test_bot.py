@@ -98,10 +98,10 @@ class Harness:
         await self.dp.feed_update(self.bot, Update(update_id=next(self.ids), message=msg))
         return self.tg.calls[mark:]
 
-    async def press(self, uid: int, data: str, chat_id: int | None = None):
+    async def press(self, uid: int, data: str, chat_id: int | None = None, text: str = "card"):
         chat_id = chat_id or uid
         mark = len(self.tg.calls)
-        msg = Message(message_id=4242, date=dt.datetime.now(dt.UTC), chat=self._chat(chat_id), text="card")
+        msg = Message(message_id=4242, date=dt.datetime.now(dt.UTC), chat=self._chat(chat_id), text=text)
         cb = CallbackQuery(
             id=str(next(self.ids)), from_user=self._user(uid), chat_instance="ci", data=data, message=msg
         )
@@ -813,3 +813,39 @@ async def test_weighted_work_report(h, session):
     await h.press(OPERATOR, card.reply_markup.inline_keyboard[0][0].callback_data, GROUP)
     # 35 г × 100 + 6 г × 100 + 4 × 70
     assert await ledger.balances(session, emp.id) == {"USD": Decimal("4380.0000")}
+
+
+async def test_packing_tags_and_finished_goods(h, session):
+    """#фасовка крам 1 40 пишет сотрудник; список готового «Крам 05 13» принимает оператор кнопкой."""
+    dept, emp = await setup_company(h, session)
+    owner = await access.load_actor(session, OWNER)
+    # «Фасовка» уже есть: за кг, $12,35 за 1 кг
+    await stock.create_product(session, owner, "kram", "г", "Крам")
+    await session.commit()
+
+    out = await h.say(IVAN, "#фасовка крам 1 40\n#фасовка крам 05 20", GROUP)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
+    assert "Фасовка × 40 кг" in card.text and "Фасовка × 10 кг" in card.text
+    await h.press(OPERATOR, card.reply_markup.inline_keyboard[0][0].callback_data, GROUP)
+    assert await ledger.balances(session, emp.id) == {"USD": Decimal("617.5000")}
+
+    out = await h.say(IVAN, "Крам 05 13\nКрам 1 7\nпривет", GROUP)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
+    assert "сдаёт на склад" in card.text and "• Крам 0.5 × 13 шт" in card.text and "• Крам 1 × 7 шт" in card.text
+    assert "Новый товар заведётся сам" in card.text
+    accept = card.reply_markup.inline_keyboard[0][0].callback_data
+    await h.press(IVAN, accept, GROUP, text=card.text)
+    assert any("Принимает на склад" in a for a in h.tg.alerts())
+
+    # Оператор принимает кнопкой под карточкой
+    out = await h.press(OPERATOR, accept, GROUP, text=card.text)
+    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "Склад принял" in c.text for c in out)
+    half = await stock.get_product(session, "Крам 0.5")
+    loc = await stock.location(session, "warehouse", dept.id)
+    assert await stock.balance(session, loc.id, half.id) == Decimal(13)
+
+    # Оператор вносит сам списком в Складе
+    await h.press(OPERATOR, f"p:st:fl:{dept.id}:{emp.id}")
+    out = texts(await h.say(OPERATOR, "Крам 05 2\nКрам 1 1"))
+    assert "Принято на склад от Иван Иванов" in out
+    assert await stock.balance(session, loc.id, half.id) == Decimal(15)

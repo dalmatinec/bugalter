@@ -216,3 +216,32 @@ def parse_block_report(text: str, known=None) -> TagReport:
     close_header()
     report.comment = " ".join(rest) or None
     return report
+
+
+@dataclass
+class GoodsLine:
+    name: str  # как написано: «Крам»
+    weight: str | None  # «05», «1» или None
+    qty: str
+    text: str
+
+
+def parse_goods_list(text: str) -> tuple[list[GoodsLine], list[str]]:
+    """Список сданного товара: «Крам 05 13», «Трюфель 1 17» (товар, вес, штук) или «Крам 13»."""
+    lines, other = [], []
+    for raw in text.splitlines():
+        line = raw.strip().strip(_QUOTES).strip()
+        if not line:
+            continue
+        words = line.split()
+        nums = 0
+        while nums < len(words) and _num(words[-1 - nums]) is not None:
+            nums += 1
+        name = " ".join(words[: len(words) - nums])
+        tail = words[len(words) - nums :]
+        if not name or nums not in (1, 2):
+            other.append(line)
+            continue
+        weight, qty = (tail[0], tail[1]) if nums == 2 else (None, tail[0])
+        lines.append(GoodsLine(name, weight, _num(qty), line))
+    return lines, other

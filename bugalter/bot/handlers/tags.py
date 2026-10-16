@@ -7,6 +7,7 @@
 В общей группе - на того, кто написал, если он сотрудник.
 """
 
+import re
 from decimal import Decimal
 
 from aiogram import F, Router
@@ -15,10 +16,11 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ...db.models import Employee, Unit, User, WorkEntry, WorkType
 from ...domain.dates import parse_date
-from ...domain.errors import ValidationError
+from ...domain.errors import AccessDenied, ValidationError
 from ...domain.money import fmt_number, fmt_qty, parse_decimal
-from ...domain.tags import parse_block_report, parse_tag_report
-from ...services import org, tariffs, work
+from ...domain.permissions import Perm
+from ...domain.tags import parse_block_report, parse_goods_list, parse_tag_report
+from ...services import org, stock, tariffs, work
 from ...services.work import STATUS_TITLES
 from .. import ui
 from ..ui import h
@@ -84,19 +86,115 @@ def report_kb(chat_id: int, message_id: int, entries: list[WorkEntry]) -> Inline
 
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.text.regexp(r"^\s*#\w"))
 async def tag_report(message: Message, session, actor, settings, chat_dept, chat_employee, notifier):
-    report = parse_tag_report(message.text)
+    if chat_dept is None:
+        return
+    # «#фасовка крам 1 40»: работа, товар, вес, штук. Если так не читается, то старый вид «#доставка 3».
+    known = await _known(session)
+    stripped = "\n".join(line.strip().removeprefix("#") for line in message.text.splitlines())
+    report = parse_block_report(stripped, known)
+    if not any(item.tag in known for item in report.items):
+        report = parse_tag_report(message.text)
     await _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier)
+
+
+async def _known(session) -> dict[str, bool]:
+    by_tag = await tariffs.work_types_by_tag(session)
+    return {tag: wt.unit_code in WEIGHT_UNITS for tag, wt in by_tag.items()}
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.text, ~F.text.startswith("/"))
 async def block_report(message: Message, session, actor, settings, chat_dept, chat_employee, notifier):
-    """Отчёт без решёток: «Крам факт 1 13» одной строкой или столбиком «Готовые крам», «5х05», «10х1»."""
+    """Без решёток: отчёт о работе «Крам факт 0.5 13» или список сданного товара «Крам 05 13»."""
     if chat_dept is None:
         return
-    by_tag = await tariffs.work_types_by_tag(session)
-    known = {tag: wt.unit_code in WEIGHT_UNITS for tag, wt in by_tag.items()}
+    known = await _known(session)
     report = parse_block_report(message.text, known)
-    await _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier)
+    if any(item.tag in known for item in report.items):
+        await _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier)
+        return
+    await _goods_card(message, session, actor, chat_dept, chat_employee, notifier)
+
+
+# ------------------------------------------------------------------ сдача готового товара
+
+
+async def _goods_card(message, session, actor, chat_dept, chat_employee, notifier):
+    """Сотрудник перечислил готовый товар: «Крам 05 13». Оператор проверяет и принимает на склад кнопкой."""
+    lines, other = parse_goods_list(message.text)
+    if not lines:
+        return
+    resolved = [(line, await stock.resolve_finished(session, line.name, line.weight)) for line in lines]
+    goods = [(line, g) for line, g in resolved if g is not None]
+    if not goods:
+        return  # обычная переписка с числами
+    employee = await _reporter(session, actor, chat_dept, chat_employee)
+    text = [f"📦 <b>{h(employee.full_name)} сдаёт на склад:</b>"]
+    new = []
+    for line, g in goods:
+        text.append(f"• {h(g.title)} × {h(line.qty)} шт")
+        if g.product is None:
+            new.append(g.title)
+    if new:
+        text.append("🆕 Новый товар заведётся сам: " + ", ".join(h(t) for t in new))
+    unknown = [line.text for line, g in resolved if g is None] + other
+    if unknown:
+        text.append("❓ Не понял: " + "; ".join(h(t) for t in unknown) + ". Товар должен быть в списке Товары.")
+    text.append("Оператор: пересчитайте и нажмите Принять. Если не сходится, Не принято и внесите вручную в Складе.")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Принять на склад", callback_data=f"fg:a:{employee.id}")
+    kb.button(text="❌ Не принято", callback_data=f"fg:r:{employee.id}")
+    kb.adjust(2)
+    notifier.answer(message, "\n".join(text), kb.as_markup())
+
+
+_GOODS_LINE = re.compile(r"^• (.+) × (\d+(?:[.,]\d+)?) шт$")
+
+
+@router.callback_query(F.data.startswith("fg:"))
+async def goods_action(callback: CallbackQuery, session, actor, settings, chat_dept, notifier):
+    _, action, emp_id = callback.data.split(":")
+    employee = await session.get(Employee, int(emp_id))
+    dept = chat_dept
+    if dept is None:
+        notifier.toast(callback, "Группа не подключена", alert=True)
+        return
+    if not actor.can(Perm.STOCK_OPERATE, dept.id):
+        raise AccessDenied("Принимает на склад оператор или кладовщик")
+    if actor.is_self(employee.id):
+        raise AccessDenied("Свой товар на склад принимает другой человек")
+    items = [m.groups() for m in map(_GOODS_LINE.match, callback.message.text.splitlines()) if m]
+    who = await ui.actor_label(session, actor.user.id)
+    head = callback.message.html_text.split("\nОператор:")[0]
+    if action == "r":
+        notifier.edit(callback.message, head + f"\n❌ Не принято ({h(who)})")
+        notifier.toast(callback, "Отмечено: не принято")
+        return
+    lines = []
+    for index, (title, qty) in enumerate(items):
+        name, _, weight = title.rpartition(" ")
+        goods = await stock.resolve_finished(session, name, weight) if name else None
+        if goods is None or goods.title != title:
+            goods = await stock.resolve_finished(session, title, None)
+        if goods is None:
+            continue
+        product = await stock.ensure_finished(session, actor, goods, dept.id)
+        result = await stock.receive(
+            session,
+            actor,
+            key=f"fg:{callback.message.chat.id}:{callback.message.message_id}:{index}",
+            department=dept,
+            product=product,
+            qty=parse_decimal(qty, what="количество"),
+            from_employee=employee,
+            comment=f"готовое от {employee.full_name}",
+            received_on=settings.today(),
+        )
+        lines.append(await ui.stock_doc_card(session, result.document))
+    notifier.edit(callback.message, head + f"\n✅ Принято на склад ({h(who)})")
+    notifier.toast(callback, "Принято на склад")
+    if employee.user_id:
+        user = await session.get(User, employee.user_id)
+        notifier.send(user.telegram_id, "📦 Склад принял у вас:\n" + head.split("\n", 1)[-1])
 
 
 async def _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier):
