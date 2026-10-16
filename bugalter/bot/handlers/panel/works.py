@@ -24,7 +24,7 @@ PAY_BUTTONS = [
     ("💵 Фиксированно за раз", "fixed"),
     ("％ Процент от суммы заказа", "percent"),
 ]
-COMMON_UNITS = ("заказ", "шт", "кг", "ч", "адрес", "заявка")
+COMMON_UNITS = ("заказ", "шт", "г", "кг", "л", "ч", "адрес", "заявка")
 
 
 async def works_view(session, settings):
@@ -152,7 +152,15 @@ async def work_method(callback: CallbackQuery, state: FSMContext, session, actor
         units = [(u, f"p:w:u:{u}") for u in COMMON_UNITS]
         grid = [units[i : i + 3] for i in range(0, len(units), 3)]
         grid.append([("Другое…", "p:w:u:*"), ("✖️ Отмена", "p:w")])
-        show(callback, notifier, f"{h(data['wt_name'])}: за что платим? Например, за заказ, за штуку, за кг.", kb(grid))
+        show(
+            callback,
+            notifier,
+            f"{h(data['wt_name'])}: за что платим? Например, за заказ, за штуку, за кг.\n\n"
+            "💡 <b>Работа по весу</b> (фасовка, факт, готовые, доставка товара): выберите г, кг или л "
+            "и потом укажите цену за 1 г (кг, л). Тогда не нужно заводить работу на каждый товар и вес: "
+            "сотрудник пишет <code>Крам факт 0.5 13</code>, и бот сам считает 13 шт × 0,5 × цена.",
+            kb(grid),
+        )
         return
     await _create_work(
         callback, state, session, actor, settings, notifier, method, "сумма" if method == "percent" else "шт"
@@ -215,6 +223,14 @@ def _rate_prompt(wt: WorkType, settings, scope: str) -> str:
         what = f"💰 Какой процент от суммы заказа платим{who}? Напишите число, например <b>3.5</b>"
     elif wt.calc_method == "fixed":
         what = f"💰 Сколько платим за один раз{who}? Напишите сумму в {cur}, например <b>700</b>"
+    elif wt.unit_code in ("г", "кг", "л"):
+        what = (
+            f"💰 Сколько платим за 1 {h(wt.unit_code)}{who}? Напишите сумму в {cur}, например <b>400</b>\n\n"
+            f"Сотрудник напишет товар, вес одной штуки и сколько штук: <code>Крам {h(wt.name)} 0.5 13</code>. "
+            f"Бот посчитает 13 × 0,5 = 6,5 {h(wt.unit_code)} × цена.\n"
+            f"<i>Если для какого-то веса цена особая, заведите ещё работу с весом в названии, например "
+            f"<b>{h(wt.name)} 0.5</b>, она будет важнее.</i>"
+        )
     else:
         what = (
             f"💰 Сколько платим за 1 {h(wt.unit_code)}{who}? Напишите сумму в {cur}, например <b>400</b>\n\n"

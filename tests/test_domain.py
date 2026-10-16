@@ -141,3 +141,21 @@ def test_report_periods():
     assert got["Срок 2 прошлого"] == (dt.date(2026, 2, 16), dt.date(2026, 2, 28))
     assert got["Квартал"] == (dt.date(2026, 1, 1), dt.date(2026, 3, 31))
     assert got["Прошлый квартал"] == (dt.date(2025, 10, 1), dt.date(2025, 12, 31))
+
+
+def test_parse_weighted_report():
+    from bugalter.domain.tags import parse_block_report
+
+    known = {"факт": True, "готовые": True, "доставка": False, "факт05": False}
+    items = parse_block_report(
+        "Крам факт 3.5 10\nТрюфель готовые 13х2\nПирожное факт 0.5 4\nКрам доставка 2\nКрам факт\n4х1", known
+    ).items
+    got = [(i.tag, i.qty, i.weight, i.product) for i in items]
+    assert got == [
+        ("факт", "10", "3.5", "Крам"),
+        ("готовые", "13", "2", "Трюфель"),
+        ("факт05", "4", None, "Пирожное"),  # особая цена для 0.5 важнее
+        ("доставка", "2", None, "Крам"),
+        ("факт", "4", "1", "Крам"),
+    ]
+    assert parse_block_report("факт будет позже\nдоставка завтра", known).items == []

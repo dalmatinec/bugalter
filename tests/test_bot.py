@@ -780,4 +780,36 @@ async def test_private_fallback_hint(h, session):
     out = texts(await h.say(IVAN, "что делать?"))
     assert "Не понял" in out and "рабочей группе" in out
     out = texts(await h.say(IVAN, "❓ Помощь"))
-    assert "Крам факт 1 13" in out and "Попросить аванс" in out
+    assert "Крам факт 0.5 13" in out and "Попросить аванс" in out
+
+
+async def test_weighted_work_report(h, session):
+    """Одна работа «Факт» с ценой за 1 г: товары и веса не заводятся, бот умножает сам."""
+    dept, emp = await setup_company(h, session)
+    owner = await access.load_actor(session, OWNER)
+    settings = await get_settings(session)
+    for name, unit, rate in (("Факт", "г", "100"), ("Факт 0.5", "шт", "70")):
+        wt = await tariffs.create_work_type(
+            session, owner, await org.unique_code(session, WorkType.code, name), unit, "per_unit", name
+        )
+        await work.add_tariffs(
+            session,
+            owner,
+            settings,
+            work_type=wt,
+            rate=Decimal(rate),
+            currency="USD",
+            department=dept,
+            employees=None,
+            valid_from=None,
+        )
+    await session.commit()
+
+    out = await h.say(IVAN, "Крам факт 3.5 10\nТрюфель факт 2 3\nПирожное факт 05 4", GROUP)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
+    assert "Факт × 35 г" in card.text and "Крам · 10 шт по 3,5 г" in card.text
+    assert "Факт × 6 г" in card.text and "Трюфель · 3 шт по 2 г" in card.text
+    assert "Факт 0.5 × 4 шт" in card.text
+    await h.press(OPERATOR, card.reply_markup.inline_keyboard[0][0].callback_data, GROUP)
+    # 35 г × 100 + 6 г × 100 + 4 × 70
+    assert await ledger.balances(session, emp.id) == {"USD": Decimal("4380.0000")}

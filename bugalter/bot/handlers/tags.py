@@ -7,6 +7,8 @@
 В общей группе - на того, кто написал, если он сотрудник.
 """
 
+from decimal import Decimal
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -14,7 +16,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from ...db.models import Employee, Unit, User, WorkEntry, WorkType
 from ...domain.dates import parse_date
 from ...domain.errors import ValidationError
-from ...domain.money import fmt_qty, parse_decimal
+from ...domain.money import fmt_number, fmt_qty, parse_decimal
 from ...domain.tags import parse_block_report, parse_tag_report
 from ...services import org, tariffs, work
 from ...services.work import STATUS_TITLES
@@ -22,6 +24,17 @@ from .. import ui
 from ..ui import h
 
 router = Router(name="tags")
+
+# Работа с такой единицей считается по весу: «Крам факт 0.5 13» = 13 шт × 0,5 по цене за 1 единицу.
+WEIGHT_UNITS = {"кг", "г", "л"}
+
+
+def _weight(text: str) -> str:
+    """«05» значит 0,5, «025» значит 0,25: так пишут вес без запятой."""
+    text = text.replace(",", ".")
+    if len(text) > 1 and text.startswith("0") and "." not in text:
+        return "0." + text[1:]
+    return text
 
 
 async def _reporter(session, actor, chat_dept, chat_employee) -> Employee:
@@ -41,6 +54,8 @@ async def report_card(session, entries: list[WorkEntry], show_amount: bool, unkn
         line = f"{ui.STATUS_ICONS[entry.status]} {h(wt.name)} × {fmt_qty(entry.quantity, entry.unit_code)}"
         if show_amount:
             line += f" = {await ui.money(session, entry.amount, entry.currency)}"
+        if entry.comment and len({e.comment for e in entries}) > 1:
+            line += f"\n      {h(entry.comment)}"
         lines.append(line)
         if entry.status in ("pending", "confirmed"):
             totals[entry.currency] = totals.get(entry.currency, 0) + entry.amount
@@ -48,7 +63,7 @@ async def report_card(session, entries: list[WorkEntry], show_amount: bool, unkn
         lines.append("Итого: " + ", ".join([await ui.money(session, v, k) for k, v in totals.items()]))
     statuses = {e.status for e in entries}
     lines.append(" · ".join(STATUS_TITLES[s] for s in sorted(statuses)))
-    if entries[0].comment:
+    if entries[0].comment and len({e.comment for e in entries}) == 1:
         lines.append(f"💬 {h(entries[0].comment)}")
     if unknown:
         names = ", ".join(h(t) for t in unknown)
@@ -78,7 +93,9 @@ async def block_report(message: Message, session, actor, settings, chat_dept, ch
     """Отчёт без решёток: «Крам факт 1 13» одной строкой или столбиком «Готовые крам», «5х05», «10х1»."""
     if chat_dept is None:
         return
-    report = parse_block_report(message.text, set(await tariffs.work_types_by_tag(session)))
+    by_tag = await tariffs.work_types_by_tag(session)
+    known = {tag: wt.unit_code in WEIGHT_UNITS for tag, wt in by_tag.items()}
+    report = parse_block_report(message.text, known)
     await _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier)
 
 
@@ -97,7 +114,23 @@ async def _save_report(message, report, session, actor, settings, chat_dept, cha
             unknown.append(item.label or f"#{item.tag}")
             continue
         unit = await session.get(Unit, wt.unit_code)
-        qty = parse_decimal(item.qty, max_scale=unit.scale, what=f"количество для {item.label or '#' + item.tag}")
+        what = item.label or "#" + item.tag
+        comment = report.comment
+        if wt.unit_code in WEIGHT_UNITS and item.weight is not None:
+            # Работа по весу: штуки × вес одной штуки, цена за 1 единицу веса.
+            pieces = parse_decimal(item.qty, max_scale=0, what=f"количество штук для {what}")
+            weight = parse_decimal(_weight(item.weight), what=f"вес для {what}")
+            qty = pieces * weight
+            if qty != qty.quantize(Decimal(1).scaleb(-unit.scale)):
+                raise ValidationError(
+                    f"{what}: получилось {fmt_number(qty)} {unit.code}, а {unit.code} считается до "
+                    f"{unit.scale} знаков после запятой"
+                )
+            detail = f"{fmt_number(pieces)} шт по {fmt_number(weight)} {unit.code}"
+            comment = " · ".join(filter(None, [item.product, detail, report.comment]))
+        else:
+            qty = parse_decimal(item.qty, max_scale=unit.scale, what=f"количество для {what}")
+            comment = " · ".join(filter(None, [item.product, report.comment])) or None
         results.append(
             await work.create_entry(
                 session,
@@ -109,7 +142,7 @@ async def _save_report(message, report, session, actor, settings, chat_dept, cha
                 work_type_id=wt.id,
                 quantity=qty,
                 performed_on=performed_on,
-                comment=report.comment,
+                comment=comment,
                 submit=True,
                 chat_id=message.chat.id,
                 self_report=True,
