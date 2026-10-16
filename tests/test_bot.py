@@ -719,3 +719,9 @@ async def test_block_report_in_group(h, session):
     out = await h.press(OPERATOR, card.reply_markup.inline_keyboard[0][0].callback_data, GROUP)
     emp_id = (await session.execute(select(WorkEntry))).scalars().first().employee_id
     assert await ledger.balances(session, emp_id) == {"USD": Decimal("2930.0000")}
+
+    # Одной строкой: название с весом и количество
+    out = await h.say(IVAN, "готовые крам 1 4", GROUP)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
+    assert "Готовые крам 1 × 4 шт" in card.text
+    assert texts(await h.say(IVAN, "крам закончился", GROUP)) == ""

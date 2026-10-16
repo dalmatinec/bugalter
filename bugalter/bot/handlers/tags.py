@@ -73,10 +73,12 @@ async def tag_report(message: Message, session, actor, settings, chat_dept, chat
     await _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier)
 
 
-@router.message(F.chat.type.in_({"group", "supergroup"}), F.text.contains("\n"), ~F.text.startswith("/"))
+@router.message(F.chat.type.in_({"group", "supergroup"}), F.text, ~F.text.startswith("/"))
 async def block_report(message: Message, session, actor, settings, chat_dept, chat_employee, notifier):
-    """Отчёт столбиком: «Готовые крам» и под ним «5х05», «10х1»."""
-    report = parse_block_report(message.text)
+    """Отчёт без решёток: «Крам факт 1 13» одной строкой или столбиком «Готовые крам», «5х05», «10х1»."""
+    if chat_dept is None:
+        return
+    report = parse_block_report(message.text, set(await tariffs.work_types_by_tag(session)))
     await _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier)
 
 

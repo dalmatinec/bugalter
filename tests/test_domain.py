@@ -118,3 +118,13 @@ def test_parse_block_report():
     ]
     assert report.date_token == "вчера" and report.comment is None
     assert parse_block_report("Привет\nкак дела").items == []
+
+
+def test_parse_one_line_report():
+    from bugalter.domain.tags import parse_block_report
+
+    known = {"кремфакт1", "кремфакт05", "доставка"}
+    report = parse_block_report("крем факт 1 13\nКрем факт 05\nдоставка х3", known)
+    assert [(i.tag, i.qty) for i in report.items] == [("кремфакт1", "13"), ("кремфакт05", "1"), ("доставка", "3")]
+    # Слово работы посреди обычной фразы не отчёт
+    assert parse_block_report("доставка будет позже", known).items == []
