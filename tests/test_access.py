@@ -133,3 +133,13 @@ async def test_delete_employee(world, session, settings):
     assert w.ivan.id not in {e.id for e, _ in await org.list_employees(session)}
     ivan = await w.reload(w.ivan_actor)
     assert ivan.employee is None and not ivan.grants
+
+
+async def test_sync_owners_from_config(session):
+    await access.ensure_owner(session, 1)
+    await access.ensure_owner(session, 21)
+    await access.ensure_owner(session, 22)
+    assert await access.sync_owners(session, [1, 22]) == 1
+    assert await access.sync_owners(session, []) == 0  # пустой список ничего не снимает
+    owners = {u.telegram_id for u in await access.owners(session)}
+    assert owners == {1, 22}

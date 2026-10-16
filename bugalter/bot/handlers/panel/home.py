@@ -22,6 +22,7 @@ HOME_SECTIONS = [
     ("💰 Работы и цены", "p:w", "за что платим и сколько", (Perm.TARIFF_MANAGE, Perm.WORKTYPE_MANAGE)),
     ("💸 Выплаты", "p:pay", "аванс и зарплата, просьбы об авансе", (Perm.PAYROLL_PAYOUT,)),
     ("📦 Склад", "p:st", "приход, выдача сотрудникам, остатки", (Perm.STOCK_OPERATE,)),
+    ("📊 Отчёты", "p:r", "за Срок 1, Срок 2, месяц, квартал, в Excel", (Perm.REPORT_EXPORT,)),
     ("💬 Группы", "p:g", "как подключить рабочую группу", (Perm.ORG_MANAGE,)),
 ]
 

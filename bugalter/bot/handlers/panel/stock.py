@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from sqlalchemy import func, select
 
-from ....db.models import Department, Employee, Product, StockDocument, StockDocumentLine
+from ....db.models import Department, Employee, Product, StockDocument, StockDocumentLine, User
 from ....domain.errors import AccessDenied, ValidationError
 from ....domain.money import fmt_number, fmt_qty, parse_decimal
 from ....domain.permissions import Perm
@@ -31,19 +31,27 @@ def _can_view(actor) -> None:
 
 async def _totals(session, dept_id: int) -> dict[int, dict[str, Decimal]]:
     """Сколько всего пришло, выдано и вернули по каждому товару (непринятые выдачи не считаются)."""
+    from_people = StockDocument.employee_id.isnot(None)
     rows = await session.execute(
-        select(StockDocumentLine.product_id, StockDocument.doc_type, func.sum(StockDocumentLine.qty_base))
+        select(
+            StockDocumentLine.product_id,
+            StockDocument.doc_type,
+            from_people,
+            func.sum(StockDocumentLine.qty_base),
+        )
         .join(StockDocument, StockDocument.id == StockDocumentLine.document_id)
         .where(
             StockDocument.department_id == dept_id,
             StockDocument.status != "returned",
-            StockDocument.doc_type.in_(("receipt", "issue", "return")),
+            StockDocument.doc_type.in_(("receipt", "issue", "return", "writeoff")),
         )
-        .group_by(StockDocumentLine.product_id, StockDocument.doc_type)
+        .group_by(StockDocumentLine.product_id, StockDocument.doc_type, from_people)
     )
     result: dict[int, dict[str, Decimal]] = {}
-    for product_id, doc_type, qty in rows.all():
-        result.setdefault(product_id, {})[doc_type] = qty
+    for product_id, doc_type, by_employee, qty in rows.all():
+        key = {("receipt", True): "made", ("writeoff", True): "used"}.get((doc_type, by_employee), doc_type)
+        bucket = result.setdefault(product_id, {})
+        bucket[key] = bucket.get(key, Decimal(0)) + qty
     return result
 
 
@@ -73,10 +81,18 @@ async def stock_view(session, actor, dept_id: int):
             continue
         u = product.base_unit
         lines.append(f"<b>{h(product.name)}</b>")
-        lines.append(
-            f"пришло {fmt_number(t.get('receipt', Decimal(0)))} · выдано {fmt_number(t.get('issue', Decimal(0)))}"
-            f" · вернули {fmt_number(t.get('return', Decimal(0)))} {h(u)}"
-        )
+        parts = [
+            (title, t.get(key))
+            for key, title in (
+                ("receipt", "пришло"),
+                ("made", "сдали готового"),
+                ("issue", "выдано"),
+                ("return", "вернули"),
+                ("used", "израсходовано"),
+                ("writeoff", "списано"),
+            )
+        ]
+        lines.append(" · ".join(f"{title} {fmt_number(qty)}" for title, qty in parts if qty) + f" {h(u)}")
         lines.append(f"🏬 на складе: <b>{fmt_qty(p['warehouse'] if p else Decimal(0), u)}</b>")
         for emp, qty in (p or {}).get("people", []):
             lines.append(f"👤 {h(emp.full_name)}: {fmt_qty(qty, u)}")
@@ -84,10 +100,13 @@ async def stock_view(session, actor, dept_id: int):
             lines.append(f"🚚 выдано, ждёт подтверждения: {fmt_qty(p['transit'], u)}")
         lines.append("")
     if len(lines) == 2:
-        lines.append("Движений пока нет. Начните с прихода товара на склад.")
+        lines.append("Движений пока нет. Начните с прихода товара на склад: кнопка 📥 Приход.")
+        lines.append("Не знаете, с чего начать? Нажмите ❓ Как работать со складом.")
     rows = [
         [("📥 Приход", f"p:st:in:{dept_id}"), ("📤 Выдать", f"p:st:out:{dept_id}")],
+        [("📦 Принять готовое", f"p:st:fin:{dept_id}"), ("✂️ Израсходовано", f"p:st:use:{dept_id}")],
         [("↩️ Возврат", f"p:st:ret:{dept_id}"), ("📜 История", f"p:st:log:{dept_id}")],
+        [("❓ Как работать со складом", f"p:st:help:{dept_id}")],
     ]
     if actor.is_owner or actor.can_anywhere(Perm.STOCK_MANAGE):
         rows.append([("🏷 Товары", "p:pr")])
@@ -158,12 +177,13 @@ async def receive_start(callback: CallbackQuery, session, actor, notifier):
 async def receive_product(callback: CallbackQuery, state: FSMContext, session, actor, notifier):
     _, _, _, dept_id, product_id = callback.data.split(":")
     product = await session.get(Product, int(product_id))
-    await ask(state, "st_qty", op="in", dept_id=int(dept_id), product_id=product.id, key=f"st:{uuid.uuid4().hex}")
+    await ask(state, "st_qty", op="in", dept_id=int(dept_id), product_id=product.id, key=_new_key())
     show(
         callback,
         notifier,
         f"📥 Сколько пришло <b>{h(product.name)}</b>? {await _qty_hint(session, product)}\n"
-        f"Можно сразу с ценой закупки за 1 {h(product.base_unit)}: <b>10 5000</b>",
+        f"Можно сразу с ценой закупки за 1 {h(product.base_unit)}: <b>10 5000</b>\n"
+        "Если пишете в упаковках, цена за 1 упаковку: <b>20 пачка 3500</b>",
         cancel_kb(f"p:st:d:{dept_id}"),
     )
 
@@ -218,7 +238,7 @@ async def issue_product(callback: CallbackQuery, state: FSMContext, session, not
         dept_id=int(dept_id),
         emp_id=emp.id,
         product_id=product.id,
-        key=f"st:{uuid.uuid4().hex}",
+        key=_new_key(),
     )
     show(
         callback,
@@ -278,7 +298,7 @@ async def return_product(callback: CallbackQuery, state: FSMContext, session, no
         dept_id=int(dept_id),
         emp_id=emp.id,
         product_id=product.id,
-        key=f"st:{uuid.uuid4().hex}",
+        key=_new_key(),
     )
     show(
         callback,
@@ -286,6 +306,136 @@ async def return_product(callback: CallbackQuery, state: FSMContext, session, no
         f"↩️ Сколько <b>{h(product.name)}</b> вернул {h(emp.full_name)}? {await _qty_hint(session, product)}",
         cancel_kb(f"p:st:d:{dept_id}"),
     )
+
+
+# ------------------------------------------------------------------ готовое от сотрудника и израсходовано
+
+
+@router.callback_query(F.data.startswith("p:st:fin:"))
+async def finished_start(callback: CallbackQuery, session, actor, notifier):
+    dept_id = int(callback.data.split(":")[3])
+    actor.require(Perm.STOCK_OPERATE, dept_id)
+    people = await org.department_employees(session, dept_id)
+    buttons = [(f"👤 {e.full_name}", f"p:st:fe:{dept_id}:{e.id}") for e in people]
+    if not buttons:
+        raise ValidationError("Сотрудников пока нет")
+    show(
+        callback,
+        notifier,
+        "📦 Кто сдаёт готовый товар на склад? (сфасовал, упаковал, наклеил этикетки)",
+        _grid(buttons, f"p:st:d:{dept_id}"),
+    )
+
+
+@router.callback_query(F.data.startswith("p:st:fe:"))
+async def finished_employee(callback: CallbackQuery, session, notifier):
+    _, _, _, dept_id, emp_id = callback.data.split(":")
+    emp = await session.get(Employee, int(emp_id))
+    buttons = await _products_kb(session, int(dept_id), f"p:st:fp:{dept_id}:{emp_id}")
+    if not buttons:
+        raise ValidationError("Товаров пока нет. Сначала добавьте товар: Ещё, Товары")
+    show(
+        callback,
+        notifier,
+        f"📦 Какой товар сдаёт <b>{h(emp.full_name)}</b>?\n"
+        "Если готового товара нет в списке, добавьте его в Товарах, например <b>Крам готовый 0.5</b>.",
+        _grid(buttons, f"p:st:d:{dept_id}"),
+    )
+
+
+@router.callback_query(F.data.startswith("p:st:fp:"))
+async def finished_product(callback: CallbackQuery, state: FSMContext, session, notifier):
+    _, _, _, dept_id, emp_id, product_id = callback.data.split(":")
+    product = await session.get(Product, int(product_id))
+    emp = await session.get(Employee, int(emp_id))
+    await ask(state, "st_qty", op="fin", dept_id=int(dept_id), emp_id=emp.id, product_id=product.id, key=_new_key())
+    show(
+        callback,
+        notifier,
+        f"📦 Сколько <b>{h(product.name)}</b> сдал {h(emp.full_name)}? {await _qty_hint(session, product)}",
+        cancel_kb(f"p:st:d:{dept_id}"),
+    )
+
+
+@router.callback_query(F.data.startswith("p:st:use:"))
+async def used_start(callback: CallbackQuery, session, actor, notifier):
+    dept_id = int(callback.data.split(":")[3])
+    actor.require(Perm.STOCK_OPERATE, dept_id)
+    buttons = []
+    for emp in await org.department_employees(session, dept_id):
+        if await _held(session, dept_id, emp.id):
+            buttons.append((f"👤 {emp.full_name}", f"p:st:ue:{dept_id}:{emp.id}"))
+    if not buttons:
+        raise ValidationError("Ни у кого из сотрудников нет товара")
+    show(
+        callback,
+        notifier,
+        "✂️ У кого списать израсходованное? Например сырьё ушло на фасовку и больше не числится на сотруднике.",
+        _grid(buttons, f"p:st:d:{dept_id}"),
+    )
+
+
+@router.callback_query(F.data.startswith("p:st:ue:"))
+async def used_employee(callback: CallbackQuery, session, notifier):
+    _, _, _, dept_id, emp_id = callback.data.split(":")
+    emp = await session.get(Employee, int(emp_id))
+    held = await _held(session, int(dept_id), emp.id)
+    buttons = await _products_kb(session, int(dept_id), f"p:st:up:{dept_id}:{emp_id}", only=held)
+    show(
+        callback,
+        notifier,
+        f"✂️ Что израсходовал <b>{h(emp.full_name)}</b>? В скобках сколько у него.",
+        _grid(buttons, f"p:st:d:{dept_id}"),
+    )
+
+
+@router.callback_query(F.data.startswith("p:st:up:"))
+async def used_product(callback: CallbackQuery, state: FSMContext, session, notifier):
+    _, _, _, dept_id, emp_id, product_id = callback.data.split(":")
+    product = await session.get(Product, int(product_id))
+    emp = await session.get(Employee, int(emp_id))
+    await ask(state, "st_qty", op="use", dept_id=int(dept_id), emp_id=emp.id, product_id=product.id, key=_new_key())
+    show(
+        callback,
+        notifier,
+        f"✂️ Сколько <b>{h(product.name)}</b> израсходовал {h(emp.full_name)}? {await _qty_hint(session, product)}",
+        cancel_kb(f"p:st:d:{dept_id}"),
+    )
+
+
+def _new_key() -> str:
+    return f"st:{uuid.uuid4().hex}"
+
+
+STOCK_HELP = """❓ <b>Как работать со складом</b>
+
+<b>1. Товар пришёл на склад</b>
+📥 Приход, выберите товар, напишите сколько. Например пришло 20 пачек по 250 г:
+если товар считается в г, а фасовка пачка = 250 г, напишите <code>20 пачка</code>.
+
+<b>2. Дать товар сотруднику</b> (фасовать, клеить этикетки, развозить)
+📤 Выдать, сотрудник, товар, количество. Сотруднику придёт кнопка Получено.
+Пока он не нажал, товар висит как 🚚 ждёт подтверждения.
+
+<b>3. Сотрудник сделал работу</b>
+Он пишет в своей группе, например <code>Крам факт 1 13</code> или <code>Готовые крам 4х05</code>.
+Оператор подтверждает кнопкой, и деньги идут сотруднику в зарплату.
+Факт: сделано здесь и сейчас. Готовые: приготовлено заранее, лежит и ждёт покупателя.
+
+<b>4. Сотрудник сдаёт готовое на склад</b>, чтобы покупатели могли забрать
+📦 Принять готовое, сотрудник, товар, сколько. Товар появится на складе.
+Сырьё, которое ушло на фасовку: ✂️ Израсходовано, тогда оно перестанет числиться на сотруднике.
+
+<b>5. Сотрудник вернул лишнее</b>
+↩️ Возврат: товар снимается с сотрудника и возвращается на склад.
+
+📜 История покажет, кто, что и когда получил или сдал."""
+
+
+@router.callback_query(F.data.startswith("p:st:help:"))
+async def stock_help(callback: CallbackQuery, notifier):
+    dept_id = int(callback.data.split(":")[3])
+    show(callback, notifier, STOCK_HELP, kb([[("⬅️ Склад", f"p:st:d:{dept_id}")]]))
 
 
 # ------------------------------------------------------------------ количество текстом
@@ -321,6 +471,19 @@ async def form_st_qty(message, state, session, actor, settings, notifier, data, 
     elif data["op"] == "out":
         result = await stock.issue(session, actor, employee=emp, **common)
         done = "📤 Выдано. Сотрудник должен нажать Получено, тогда товар запишется на него"
+    elif data["op"] == "fin":
+        result = await stock.receive(
+            session,
+            actor,
+            **common,
+            from_employee=emp,
+            comment=f"готовое от {emp.full_name}",
+            received_on=settings.today(),
+        )
+        done = f"📦 Принято на склад от {h(emp.full_name)}"
+    elif data["op"] == "use":
+        result = await stock.write_off(session, actor, employee=emp, reason="израсходовано на работу", **common)
+        done = f"✂️ Списано у {h(emp.full_name)} как израсходованное"
     else:
         result = await stock.return_to_stock(session, actor, employee=emp, **common)
         done = "↩️ Возврат записан"
@@ -328,6 +491,10 @@ async def form_st_qty(message, state, session, actor, settings, notifier, data, 
     card = await ui.stock_doc_card(session, result.document)
     if data["op"] == "out" and result.created:
         await _ask_recipient(session, notifier, result.document, card)
+    elif data["op"] in ("fin", "use", "ret") and result.created and emp.user_id:
+        # Сотруднику видно, что склад записал: что принято от него или списано с него.
+        user = await session.get(User, emp.user_id)
+        notifier.send(user.telegram_id, "📦 Склад записал:\n" + card)
     await session.flush()
     text, markup = await stock_view(session, actor, dept.id)
     notifier.answer(message, f"{done}\n{card}")

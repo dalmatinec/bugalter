@@ -416,3 +416,118 @@ def render_text(table: Table, max_rows: int = 60) -> str:
         lines.append("Нет данных")
     lines.extend(table.notes)
     return "\n".join(lines)
+
+
+@dataclass
+class SummaryRow:
+    employee: Employee
+    earned: Decimal = Decimal(0)  # подтверждённая работа и оклад
+    bonus: Decimal = Decimal(0)
+    minus: Decimal = Decimal(0)  # штрафы и удержания (положительное число)
+    fixes: Decimal = Decimal(0)  # сторно
+    advance_paid: Decimal = Decimal(0)
+    salary_paid: Decimal = Decimal(0)
+    advance_left: Decimal = Decimal(0)  # на сегодня: аванс ещё не вычтен
+    balance: Decimal = Decimal(0)  # на сегодня: сколько компания должна сотруднику
+
+
+async def period_summary(
+    session: AsyncSession, date_from: dt.date, date_to: dt.date, department_ids: set[int] | None, currency: str
+) -> list[SummaryRow]:
+    """Сводка за период по каждому сотруднику: заработал, премии, штрафы, выдано авансом и зарплатой."""
+    rows: dict[int, SummaryRow] = {}
+
+    async def row_for(emp_id: int) -> SummaryRow:
+        if emp_id not in rows:
+            rows[emp_id] = SummaryRow(await session.get(Employee, emp_id))
+        return rows[emp_id]
+
+    ledger_q = (
+        select(LedgerEntry.employee_id, LedgerEntry.entry_type, func.sum(LedgerEntry.amount))
+        .where(LedgerEntry.currency == currency, LedgerEntry.business_date.between(date_from, date_to))
+        .group_by(LedgerEntry.employee_id, LedgerEntry.entry_type)
+    )
+    if department_ids is not None:
+        ledger_q = ledger_q.where(LedgerEntry.department_id.in_(department_ids or {-1}))
+    for emp_id, etype, amount in (await session.execute(ledger_q)).all():
+        row = await row_for(emp_id)
+        if etype == "work":
+            row.earned += amount
+        elif etype == "bonus":
+            row.bonus += amount
+        elif etype in ("penalty", "deduction"):
+            row.minus -= amount
+        elif etype == "reversal":
+            row.fixes += amount
+    payout_q = (
+        select(Payout.employee_id, Payout.kind, func.sum(Payout.amount))
+        .where(
+            Payout.currency == currency,
+            Payout.status == "confirmed",
+            Payout.business_date.between(date_from, date_to),
+        )
+        .group_by(Payout.employee_id, Payout.kind)
+    )
+    if department_ids is not None:
+        payout_q = payout_q.where(Payout.department_id.in_(department_ids or {-1}))
+    for emp_id, kind, amount in (await session.execute(payout_q)).all():
+        row = await row_for(emp_id)
+        if kind in payroll.ADVANCE_KINDS:
+            row.advance_paid += amount
+        else:
+            row.salary_paid += amount
+    for emp_id, row in rows.items():
+        row.advance_left = await payroll.outstanding_advance(session, emp_id, currency)
+        row.balance = await session.scalar(
+            select(func.coalesce(func.sum(LedgerEntry.amount), 0)).where(
+                LedgerEntry.employee_id == emp_id, LedgerEntry.currency == currency
+            )
+        ) or Decimal(0)
+    return sorted(rows.values(), key=lambda r: r.employee.full_name)
+
+
+def summary_table(rows: list[SummaryRow], date_from: dt.date, date_to: dt.date, currency: str) -> Table:
+    table = Table(
+        title=f"Сводка {date_from:%d.%m.%Y}-{date_to:%d.%m.%Y}, {currency}",
+        headers=[
+            "Сотрудник",
+            "Заработано",
+            "Премии",
+            "Штрафы и удержания",
+            "Исправления",
+            "Выдано авансом",
+            "Выплачено зарплатой",
+            "Аванс не вычтен (сейчас)",
+            "Остаток к выплате (сейчас)",
+        ],
+    )
+    for r in rows:
+        table.rows.append(
+            [
+                r.employee.full_name,
+                r.earned,
+                r.bonus,
+                r.minus,
+                r.fixes,
+                r.advance_paid,
+                r.salary_paid,
+                r.advance_left,
+                r.balance,
+            ]
+        )
+    if rows:
+        table.rows.append(
+            [
+                "ИТОГО",
+                sum((r.earned for r in rows), Decimal(0)),
+                sum((r.bonus for r in rows), Decimal(0)),
+                sum((r.minus for r in rows), Decimal(0)),
+                sum((r.fixes for r in rows), Decimal(0)),
+                sum((r.advance_paid for r in rows), Decimal(0)),
+                sum((r.salary_paid for r in rows), Decimal(0)),
+                sum((r.advance_left for r in rows), Decimal(0)),
+                sum((r.balance for r in rows), Decimal(0)),
+            ]
+        )
+    table.notes.append("Заработано: подтверждённая работа и оклад. Неподтверждённые отчёты не входят.")
+    return table

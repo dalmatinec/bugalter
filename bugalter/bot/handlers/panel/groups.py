@@ -102,17 +102,13 @@ ADMIN_HINT = "\n\n⚠️ Сделайте меня администраторо�
 
 
 def _bound_text(dept: Department, emp: Employee | None) -> str:
+    from ..common import REPORT_HOWTO
+
     if emp:
-        return (
-            f"✅ Это группа: <b>{h(emp.full_name)}</b>.\n"
-            "Отчёт о работе пишите тегом и количеством: <code>#доставка 3</code>, можно несколько в одном "
-            "сообщении. Теги работ видны у владельца в Работах и ценах. Или кнопками: /op" + ADMIN_HINT
-        )
-    return (
-        "✅ Группа подключена.\n"
-        "Сотрудник отчитывается тегами: <code>#доставка 3</code>, работа записывается на того, кто написал. "
-        "Оператор вносит за другого кнопками: /op" + ADMIN_HINT
-    )
+        who = f"✅ Это группа: <b>{h(emp.full_name)}</b>. Отчёты здесь записываются на него.\n\n"
+    else:
+        who = "✅ Группа подключена. Отчёт записывается на того, кто его написал.\n\n"
+    return who + REPORT_HOWTO + ADMIN_HINT
 
 
 @router.callback_query(F.data.startswith("g:b:"))

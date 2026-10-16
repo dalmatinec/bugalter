@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
@@ -149,6 +150,31 @@ async def ensure_owner(session: AsyncSession, telegram_id: int) -> None:
     if not exists:
         session.add(AccessGrant(user_id=user.id, role_code=OWNER_ROLE, department_id=None))
         await audit(session, None, "access.bootstrap_owner", "user", user.id, {"telegram_id": telegram_id})
+
+
+async def sync_owners(session: AsyncSession, telegram_ids: list[int]) -> int:
+    """Владельцы ровно те, кто в OWNER_TELEGRAM_IDS: убранным из списка роль владельца снимается."""
+    if not telegram_ids:
+        return 0  # пустой список не повод оставить бота без владельцев
+    stale = (
+        (
+            await session.execute(
+                select(AccessGrant)
+                .join(User, User.id == AccessGrant.user_id)
+                .where(
+                    AccessGrant.role_code == OWNER_ROLE,
+                    AccessGrant.revoked_at.is_(None),
+                    User.telegram_id.notin_(telegram_ids),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for grant in stale:
+        grant.revoked_at = dt.datetime.now(dt.UTC)
+        await audit(session, None, "access.owner_removed", "access_grant", grant.id, {"user_id": grant.user_id})
+    return len(stale)
 
 
 async def grant_role(

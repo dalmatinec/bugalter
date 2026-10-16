@@ -374,7 +374,8 @@ async def accept_invite_start(message: Message, token: str, session, actor, noti
     notifier.answer(
         message,
         f"✅ Готово! Вы подключены: <b>{h(emp.full_name)}</b>.{role_note}\n"
-        "Здесь, в личке, ваша работа, зарплата и выплаты (кнопки внизу).",
+        "Здесь, в личке, ваша работа, зарплата и выплаты (кнопки внизу).\n"
+        "Отчёт о работе пишите в своей рабочей группе. Как именно, подскажет кнопка ❓ Помощь.",
         await ui.main_menu_for(session, actor, can_admin(actor)),
     )
     if creator is not None:

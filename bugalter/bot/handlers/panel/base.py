@@ -26,6 +26,7 @@ ADMIN_PERMS = (
     Perm.PAYROLL_SIGN,
     Perm.PAYROLL_PAYOUT,
     Perm.STOCK_OPERATE,
+    Perm.REPORT_EXPORT,
 )
 
 

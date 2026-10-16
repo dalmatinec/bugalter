@@ -404,7 +404,7 @@ async def test_admin_panel_simple_setup(h, session):
     out = await h.press(OWNER, "p:first:USD")
     markup = next(c.reply_markup for c in out if getattr(c, "reply_markup", None))
     labels = [b.text for row in markup.inline_keyboard for b in row]
-    assert labels == ["👥 Сотрудники", "💰 Работы и цены", "💸 Выплаты", "📦 Склад", "💬 Группы", "➕ Ещё"]
+    assert labels == ["👥 Сотрудники", "💰 Работы и цены", "💸 Выплаты", "📦 Склад", "📊 Отчёты", "💬 Группы", "➕ Ещё"]
     out = await h.say(OWNER, "⚙️ Управление")
     assert [b.text for row in out[-1].reply_markup.inline_keyboard for b in row] == labels
     dept = (await session.execute(select(Department))).scalar_one()  # создана автоматически
@@ -663,7 +663,7 @@ async def test_stock_panel_buttons(h, session):
     await h.press(IVAN, f"sd:a:{doc.id}")
 
     out = texts(await h.press(OWNER, f"p:st:d:{dept.id}"))
-    assert "пришло 50 · выдано 2 · вернули 0 кг" in out
+    assert "пришло 50 · выдано 2 кг" in out
     assert "на складе: <b>48 кг</b>" in out and "Иван Иванов: 2 кг" in out
 
     await h.press(OWNER, f"p:st:rp:{dept.id}:{emp.id}:{coffee.id}")
@@ -671,6 +671,17 @@ async def test_stock_panel_buttons(h, session):
     assert "Возврат записан" in out and "Иван Иванов: 1,5 кг" in out and "на складе: <b>48,5 кг</b>" in out
     out = texts(await h.press(OWNER, f"p:st:log:{dept.id}"))
     assert "Выдача сотруднику · Иван Иванов" in out
+
+    # Сотрудник израсходовал сырьё и сдал готовое на склад
+    await h.press(OWNER, f"p:st:up:{dept.id}:{emp.id}:{coffee.id}")
+    out = await h.say(OWNER, "1")
+    assert "Списано у Иван Иванов" in texts(out)
+    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "Склад записал" in c.text for c in out)
+    await h.press(OWNER, f"p:st:fp:{dept.id}:{emp.id}:{coffee.id}")
+    out = texts(await h.say(OWNER, "3"))
+    assert "Принято на склад от Иван Иванов" in out
+    assert "сдали готового 3" in out and "израсходовано 1" in out
+    assert "Иван Иванов: 0,5 кг" in out and "на складе: <b>51,5 кг</b>" in out
 
     # Работнику без прав склад не открывается
     await h.press(IVAN, "p:st")
@@ -725,3 +736,48 @@ async def test_block_report_in_group(h, session):
     card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
     assert "Готовые крам 1 × 4 шт" in card.text
     assert texts(await h.say(IVAN, "крам закончился", GROUP)) == ""
+
+
+async def test_reports_panel(h, session):
+    """Отчёт за Срок 1 и т.п.: заработал, аванс, сколько должны; Excel."""
+    dept, emp = await setup_company(h, session)
+    owner = await access.load_actor(session, OWNER)
+    settings = await get_settings(session)
+    delivery = (await session.execute(select(WorkType).where(WorkType.code == "доставка"))).scalar_one()
+    res = await work.create_entry(
+        session,
+        owner,
+        settings,
+        idempotency_key="r1",
+        department_id=dept.id,
+        employee_id=emp.id,
+        work_type_id=delivery.id,
+        quantity=Decimal(2),
+    )
+    await work.confirm_entry(session, owner, settings, res.entry.id)
+    await session.commit()
+    await h.press(OWNER, f"p:pay:adv:{emp.id}")
+    await h.say(OWNER, "300")
+
+    out = texts(await h.press(OWNER, "p:r"))
+    assert "Срок 1 это с 1 по 15" in out
+    today = settings.today()
+    code = today.strftime("%Y%m%d")
+    out = texts(await h.press(OWNER, f"p:r:v:{code}:{code}"))
+    assert "заработал $800,00" in out and "аванс $300,00" in out and "сейчас ему должны $500,00" in out
+    out = await h.press(OWNER, f"p:r:x:{code}:{code}")
+    assert any(isinstance(c, SendDocument) for c in out)
+    await h.press(OWNER, "p:r:in")
+    out = texts(await h.say(OWNER, "месяц"))
+    assert "Иван Иванов" in out
+    # Оператору деньги всех не показываем
+    await h.press(OPERATOR, "p:r")
+    assert any("Отчёты доступны" in a for a in h.tg.alerts())
+
+
+async def test_private_fallback_hint(h, session):
+    await setup_company(h, session)
+    out = texts(await h.say(IVAN, "что делать?"))
+    assert "Не понял" in out and "рабочей группе" in out
+    out = texts(await h.say(IVAN, "❓ Помощь"))
+    assert "Крам факт 1 13" in out and "Попросить аванс" in out

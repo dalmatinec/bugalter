@@ -14,7 +14,7 @@ from ..config import Config, get_config
 from ..db.session import make_engine, make_sessionmaker
 from ..logs import setup_logging
 from ..services import access, org, reference
-from .handlers import common, me, panel, payroll, reports, stock, tags, work
+from .handlers import common, fallback, me, panel, payroll, reports, stock, tags, work
 from .middlewares import ContextMiddleware
 from .storage import PostgresStorage
 
@@ -36,6 +36,7 @@ ROUTERS = (
     stock.router,
     payroll.router,
     reports.router,
+    fallback.router,
 )
 
 
@@ -56,6 +57,7 @@ async def bootstrap(sessionmaker: async_sessionmaker[AsyncSession], config: Conf
         await org.ensure_default_department(session)
         for telegram_id in config.owner_telegram_ids:
             await access.ensure_owner(session, telegram_id)
+        await access.sync_owners(session, config.owner_telegram_ids)
     removed = await PostgresStorage(sessionmaker).cleanup()
     if removed:
         log.info("fsm_cleanup", removed=removed)

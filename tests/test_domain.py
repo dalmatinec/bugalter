@@ -128,3 +128,16 @@ def test_parse_one_line_report():
     assert [(i.tag, i.qty) for i in report.items] == [("кремфакт1", "13"), ("кремфакт05", "1"), ("доставка", "3")]
     # Слово работы посреди обычной фразы не отчёт
     assert parse_block_report("доставка будет позже", known).items == []
+
+
+def test_report_periods():
+    import datetime as dt
+
+    from bugalter.bot.handlers.panel.reports import periods
+
+    got = {title.split(":")[0]: (a, b) for title, a, b in periods(dt.date(2026, 3, 10), 15)}
+    assert got["Срок 1"] == (dt.date(2026, 3, 1), dt.date(2026, 3, 15))
+    assert got["Срок 2"] == (dt.date(2026, 3, 16), dt.date(2026, 3, 31))
+    assert got["Срок 2 прошлого"] == (dt.date(2026, 2, 16), dt.date(2026, 2, 28))
+    assert got["Квартал"] == (dt.date(2026, 1, 1), dt.date(2026, 3, 31))
+    assert got["Прошлый квартал"] == (dt.date(2025, 10, 1), dt.date(2025, 12, 31))

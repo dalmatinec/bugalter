@@ -462,8 +462,12 @@ async def receive(
     unit_cost: Decimal | None = None,
     currency: str | None = None,
     received_on: dt.date | None = None,
+    from_employee: Employee | None = None,
 ) -> DocResult:
-    """Поступление создаёт партию. unit_cost — цена за единицу ввода (за «уп», если вводили в упаковках)."""
+    """Поступление создаёт партию. unit_cost — цена за единицу ввода (за «уп», если вводили в упаковках).
+
+    from_employee: готовый товар, который сдал сотрудник (сфасовал, упаковал); иначе пришло от поставщика.
+    """
     if unit_cost is not None:
         if unit_cost < 0:
             raise ValidationError("Цена не может быть отрицательной")
@@ -483,6 +487,7 @@ async def receive(
         dst=await location(session, "warehouse", department.id),
         comment=comment,
         chat_id=chat_id,
+        employee_id=from_employee.id if from_employee else None,
         new_batch={
             "unit_cost": unit_cost,
             "currency": currency.upper() if currency else None,
