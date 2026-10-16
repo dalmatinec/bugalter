@@ -12,7 +12,7 @@ from ....domain.dates import parse_range
 from ....domain.errors import AccessDenied
 from ....domain.money import fmt_money
 from ....domain.permissions import Perm
-from ....services import fixed_salary, reports
+from ....services import expenses, fixed_salary, reports
 from ...ui import h
 from .base import ask, cancel_kb, form, kb, show
 
@@ -144,6 +144,9 @@ async def summary_view(session, actor, settings, date_from: dt.date, date_to: dt
         lines += ["", f"Итого заработано {m(total)}, выдано {m(paid)}"]
     else:
         lines.append("За эти даты ничего нет.")
+    spent = await expenses.totals(session, date_from, date_to, cur)
+    if spent:
+        lines += ["", f"🧾 Расходы {m(sum(a for _, a in spent))}: " + ", ".join(f"{h(c)} {m(a)}" for c, a in spent)]
     markup = kb(
         [
             [("📥 Скачать Excel", f"p:r:x:{_code(date_from)}:{_code(date_to)}")],
@@ -166,6 +169,8 @@ async def report_excel(callback: CallbackQuery, session, actor, settings, notifi
     await fixed_salary.accrue_all(session, settings)
     rows = await reports.period_summary(session, date_from, date_to, _depts(actor), settings.currency)
     table = reports.summary_table(rows, date_from, date_to, settings.currency)
+    for category, amount in await expenses.totals(session, date_from, date_to, settings.currency):
+        table.notes.append(f"Расход: {category} {amount} {settings.currency}")
     notifier.document(
         callback.message.chat.id, table.to_xlsx(), f"otchet_{date_from:%d%m}-{date_to:%d%m%Y}.xlsx", table.title
     )

@@ -404,7 +404,17 @@ async def test_admin_panel_simple_setup(h, session):
     out = await h.press(OWNER, "p:first:USD")
     markup = next(c.reply_markup for c in out if getattr(c, "reply_markup", None))
     labels = [b.text for row in markup.inline_keyboard for b in row]
-    assert labels == ["👥 Сотрудники", "💰 Работы и цены", "💸 Выплаты", "📦 Склад", "📊 Отчёты", "💬 Группы", "➕ Ещё"]
+    assert labels == [
+        "👥 Сотрудники",
+        "💰 Работы и цены",
+        "💸 Выплаты",
+        "📦 Склад",
+        "🏷 Товары",
+        "📊 Отчёты",
+        "🧾 Расходы",
+        "💬 Группы",
+        "➕ Ещё",
+    ]
     out = await h.say(OWNER, "⚙️ Управление")
     assert [b.text for row in out[-1].reply_markup.inline_keyboard for b in row] == labels
     dept = (await session.execute(select(Department))).scalar_one()  # создана автоматически
@@ -897,10 +907,48 @@ async def test_report_mistakes_delete_and_undo(h, session):
 
 
 async def test_product_units_and_weight_hint(h, session):
+    """Вес в названии: товар сохраняется как написали, без вопросов. Без веса спрашиваем гр, кг или шт."""
     await setup_company(h, session)
     await h.press(OWNER, "p:pr:add")
-    out = await h.say(OWNER, "Крам 20G")
+    out = texts(await h.say(OWNER, "Крам 20г"))
+    assert "Товар добавлен: <b>Крам 20г</b>" in out
+    assert (await stock.get_product(session, "Крам 20г")).base_unit == "шт"
+    await h.press(OWNER, "p:pr:add")
+    out = await h.say(OWNER, "Трюфель")
     msg = next(c for c in out if isinstance(c, SendMessage))
     labels = [b.text for row in msg.reply_markup.inline_keyboard for b in row]
     assert labels[:3] == ["гр", "кг", "шт"]
-    assert "В названии вес 20G" in msg.text
+    out = texts(await h.press(OWNER, "p:pr:u:г"))
+    assert "Товар добавлен: <b>Трюфель</b>" in out
+
+
+async def test_product_stats_and_expenses(h, session):
+    dept, emp = await setup_company(h, session)
+    # «Фасовка» уже есть: за кг, цена за 1 кг
+    out = await h.say(IVAN, "крам фасовка 0.5 10\nТрюфель фасовка 1 3\nКрам фасовка 1 2", GROUP)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
+    await h.press(OPERATOR, card.reply_markup.inline_keyboard[0][0].callback_data, GROUP)
+    today = (await get_settings(session)).today()
+    out = texts(await h.press(OWNER, f"p:pr:st:{today:%Y%m}"))
+    assert "<b>Крам</b>" in out and "Фасовка: 12 шт, всего 7 кг (10 по 0,5, 2 по 1)" in out
+    assert "<b>Трюфель</b>" in out and "Фасовка: 3 шт, всего 3 кг" in out
+    out = texts(await h.press(OWNER, "p:pr"))
+    assert "Кофе зерно</b>: на складе 0 кг" in out
+
+    await h.press(OWNER, "p:x:add")
+    await h.press(OWNER, "p:x:c:0")  # Реклама
+    out = await h.say(OWNER, "50000 таргет инстаграм")
+    assert "Расход записан: Реклама $50" in texts(out)
+    out = texts(await h.press(OWNER, "p:x"))
+    assert "Реклама: <b>$50" in out and "таргет инстаграм" in out
+    code = today.strftime("%Y%m%d")
+    out = texts(await h.press(OWNER, f"p:r:v:{code}:{code}"))
+    assert "Расходы $50" in out
+    from bugalter.db.models import Expense
+
+    expense = (await session.execute(select(Expense))).scalar_one()
+    await h.press(OWNER, f"p:x:del:{expense.id}")
+    out = texts(await h.press(OWNER, "p:x"))
+    assert "расходов нет" in out
+    await h.press(OPERATOR, "p:x")
+    assert any("Расходы ведут" in a for a in h.tg.alerts())

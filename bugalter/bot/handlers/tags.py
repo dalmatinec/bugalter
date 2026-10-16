@@ -32,6 +32,14 @@ router = Router(name="tags")
 WEIGHT_UNITS = {"кг", "г", "л"}
 
 
+def _product_title(text: str | None) -> str | None:
+    """«крам» и «Крам» это один товар: храним с большой буквы, без лишних пробелов."""
+    if not text:
+        return None
+    text = " ".join(text.split())
+    return text[:1].upper() + text[1:]
+
+
 def _weight(text: str) -> str:
     """«05» значит 0,5, «025» значит 0,25: так пишут вес без запятой."""
     text = text.replace(",", ".")
@@ -284,9 +292,11 @@ async def _save_report(message, report, session, actor, settings, chat_dept, cha
                 )
             detail = f"{fmt_number(pieces)} шт по {fmt_number(weight)} {unit.code}"
             comment = " · ".join(filter(None, [item.product, detail, report.comment]))
+            stats = {"pieces": pieces, "piece_weight": weight}
         else:
             qty = parse_decimal(item.qty, max_scale=unit.scale, what=f"количество для {what}")
             comment = " · ".join(filter(None, [item.product, report.comment])) or None
+            stats = {"pieces": qty if unit.scale == 0 else None, "piece_weight": None}
         results.append(
             await work.create_entry(
                 session,
@@ -302,6 +312,8 @@ async def _save_report(message, report, session, actor, settings, chat_dept, cha
                 submit=True,
                 chat_id=message.chat.id,
                 self_report=True,
+                product_name=_product_title(item.product),
+                **stats,
             )
         )
     if not any(r.created for r in results):

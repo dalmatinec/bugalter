@@ -1,6 +1,9 @@
 """Товары: номенклатура для склада, единица учёта (гр, кг, шт) и фасовка, например 1 шт = 20 гр."""
 
+import calendar
+import datetime as dt
 import re
+from decimal import Decimal
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -9,10 +12,9 @@ from aiogram.types import CallbackQuery
 from ....db.models import Product
 from ....domain.errors import ValidationError
 from ....domain.money import fmt_number, fmt_qty, parse_decimal
-from ....domain.permissions import Perm
-from ....services import org, reference, stock
+from ....services import org, reference, stats, stock
 from ...ui import h
-from .base import ask, cancel_kb, form, kb, rate_text, show
+from .base import ask, cancel_kb, form, kb, show
 
 router = Router(name="panel.products")
 
@@ -24,30 +26,65 @@ _WEIGHT_IN_NAME = re.compile(r"(\d+(?:[.,]\d+)?)\s*(g|г|гр|kg|кг)\b", re.IG
 
 
 async def products_view(session):
-    lines = ["📦 <b>Товары</b>", ""]
+    lines = ["📦 <b>Товары</b>", "Сколько есть сейчас: на складе, у сотрудников и выдано, но ещё не принято.", ""]
     rows = []
-    for product, units in await stock.list_products(session):
-        alt = ", ".join(f"1 {u.unit_code} = {fmt_number(u.factor)} {product.base_unit}" for u in units)
-        lines.append(f"• <b>{h(product.name)}</b> ({h(product.base_unit)}){' · ' + alt if alt else ''}")
+    places = await stats.stock_by_product(session)
+    for product, _units in await stock.list_products(session):
+        p = places.get(product.id)
+        u = product.base_unit
+        line = f"• <b>{h(product.name)}</b>: на складе {fmt_qty(p.warehouse if p else Decimal(0), u)}"
+        if p and p.people:
+            line += f", у сотрудников {fmt_qty(p.people, u)}"
+        if p and p.transit:
+            line += f", в пути {fmt_qty(p.transit, u)}"
+        lines.append(line)
         rows.append([(f"📦 {product.name}", f"p:pr:v:{product.id}")])
     if not rows:
-        lines.append("Пока нет товаров.")
-    rows.append([("➕ Новый товар", "p:pr:add")])
-    rows.append([("⬅️ Назад", "p:more")])
+        lines.append("Пока нет товаров. Нажмите ➕ Новый товар.")
+    rows.append([("📊 Статистика: сколько сделано и продано", f"p:pr:st:{dt.date.today():%Y%m}")])
+    rows.append([("➕ Новый товар", "p:pr:add"), ("📦 Склад", "p:st")])
+    rows.append([("⬅️ В меню", "p:home")])
     return "\n".join(lines), kb(rows)
 
 
 async def product_view(session, product_id: int):
     product = await session.get(Product, product_id)
-    lines = [
-        f"📦 <b>{h(product.name)}</b>  <i>артикул для команд: {h(product.sku)}</i>",
-        f"Учёт в: {h(product.base_unit)}",
-    ]
-    for batch, remaining in (await stock.product_batches(session, product))[:10]:
-        cost = rate_text(batch.unit_cost, batch.currency) if batch.unit_cost is not None else "без цены"
-        lines.append(f"• партия от {batch.received_on:%d.%m}: осталось {fmt_qty(remaining, product.base_unit)}, {cost}")
-    rows = [[("➕ Фасовка", f"p:pr:pk:{product.id}")], [("⬅️ Товары", "p:pr")]]
+    u = product.base_unit
+    lines = [f"📦 <b>{h(product.name)}</b>", ""]
+    for row in await stock.balances(session):
+        if row.product.id == product.id:
+            lines.append(f"• {h(row.location_title)}: {fmt_qty(row.qty, u)}")
+    if len(lines) == 2:
+        lines.append("Сейчас нигде нет.")
+    rows = [[("📦 Склад: приход, выдача", "p:st")], [("⬅️ Товары", "p:pr")]]
     return "\n".join(lines), kb(rows)
+
+
+def _month(code: str) -> dt.date:
+    return dt.date(int(code[:4]), int(code[4:]), 1)
+
+
+@router.callback_query(F.data.startswith("p:pr:st:"))
+async def product_stats(callback: CallbackQuery, session, settings, notifier):
+    first = _month(callback.data.split(":")[3])
+    last = first.replace(day=calendar.monthrange(first.year, first.month)[1])
+    lines = [f"📊 <b>Статистика по товарам</b> · {first:%m.%Y}", "Только подтверждённые отчёты сотрудников.", ""]
+    for item in await stats.product_stats(session, first, last):
+        lines.append(f"<b>{h(item.name)}</b>")
+        for line in item.works.values():
+            text = f"   {h(line.work)}: {fmt_number(line.pieces)} шт"
+            if line.weight:
+                parts = ", ".join(f"{fmt_number(n)} по {fmt_number(w)}" for w, n in sorted(line.by_weight.items()))
+                text += f", всего {fmt_qty(line.weight, line.unit)} ({parts})"
+            lines.append(text)
+    if len(lines) == 3:
+        lines.append("За этот месяц отчётов с товарами нет.")
+    prev = (first - dt.timedelta(days=1)).replace(day=1)
+    nxt = last + dt.timedelta(days=1)
+    nav = [("⬅️ " + f"{prev:%m.%Y}", f"p:pr:st:{prev:%Y%m}")]
+    if nxt <= settings.today():
+        nav.append((f"{nxt:%m.%Y} ➡️", f"p:pr:st:{nxt:%Y%m}"))
+    show(callback, notifier, "\n".join(lines), kb([nav, [("⬅️ Товары", "p:pr")]]))
 
 
 @router.callback_query(F.data == "p:pr")
@@ -63,26 +100,36 @@ async def product(callback: CallbackQuery, session, notifier):
 
 @router.callback_query(F.data == "p:pr:add")
 async def product_add(callback: CallbackQuery, state: FSMContext, actor, notifier):
-    actor.require(Perm.STOCK_MANAGE)
+    stock.require_catalog(actor)
     await ask(state, "product_name")
-    show(callback, notifier, "✏️ Название товара, например: <b>Кофе зерно</b>", cancel_kb("p:pr"))
+    show(callback, notifier, "✏️ Название товара, например: <b>Крам 20г</b> или <b>Трюфель</b>", cancel_kb("p:pr"))
 
 
 @form("product_name")
-async def form_product_name(message, state, session, notifier, **_):
+async def form_product_name(message, state, session, actor, notifier, **_):
     name = " ".join(message.text.split())
     await state.update_data(product_name=name)
+    if _WEIGHT_IN_NAME.search(name):
+        # Вес уже в названии («Крам 20г»): сохраняем как написали, ничего больше не спрашиваем.
+        await _create(message, state, session, actor, notifier, name, "шт")
+        return
     units = [(UNIT_LABELS.get(code, code), f"p:pr:u:{code}") for code in await _stock_units(session)]
     grid = [units, [("✖️ Отмена", "p:pr")]]
-    text = f"{h(name)}: в чём считать остаток на складе? гр, кг или шт."
-    if match := _WEIGHT_IN_NAME.search(name):
-        text += (
-            f"\n\n💡 В названии вес {h(match.group(0))}. Если это готовая пачка такого веса, "
-            "считайте в <b>шт</b>: так проще пересчитывать."
-        )
-    else:
-        text += "\nНапример сырьё на вес в гр или кг, готовые пачки в шт."
-    notifier.answer(message, text, kb(grid))
+    notifier.answer(
+        message,
+        f"{h(name)}: в чём считать? Если товар на вес, гр или кг. Если поштучно, шт.\n"
+        "<i>Подсказка: если написать вес в названии, например «Крам 20г», бот не будет спрашивать.</i>",
+        kb(grid),
+    )
+
+
+async def _create(event, state, session, actor, notifier, name: str, unit: str) -> None:
+    sku = await org.unique_code(session, Product.sku, name)
+    created = await stock.create_product(session, actor, sku, unit, name)
+    await state.clear()
+    await session.flush()
+    text, markup = await product_view(session, created.id)
+    show(event, notifier, f"✅ Товар добавлен: <b>{h(name)}</b>\n\n" + text, markup)
 
 
 async def _stock_units(session) -> list[str]:
@@ -95,12 +142,7 @@ async def product_unit_choice(callback: CallbackQuery, state: FSMContext, sessio
     data = await state.get_data()
     if "product_name" not in data:
         raise ValidationError("Начните заново: Товары → Новый товар")
-    unit = callback.data.split(":", 3)[3]
-    sku = await org.unique_code(session, Product.sku, data["product_name"])
-    created = await stock.create_product(session, actor, sku, unit, data["product_name"])
-    await state.clear()
-    await session.flush()
-    show(callback, notifier, *await product_view(session, created.id))
+    await _create(callback, state, session, actor, notifier, data["product_name"], callback.data.split(":", 3)[3])
 
 
 @router.callback_query(F.data.startswith("p:pr:pk:"))

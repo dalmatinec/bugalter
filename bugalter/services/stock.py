@@ -62,10 +62,16 @@ DOC_TITLES = {
 # ------------------------------------------------------------------ номенклатура
 
 
+def require_catalog(actor) -> None:
+    """Заводить товары может и кладовщик (право на складские движения), не только владелец."""
+    if not (actor.can(Perm.STOCK_MANAGE) or actor.can_anywhere(Perm.STOCK_OPERATE)):
+        raise AccessDenied("Товары заводят владелец, кладовщик и оператор склада")
+
+
 async def create_product(
     session: AsyncSession, actor, sku: str, unit_code: str, name: str, category: str | None = None
 ) -> Product:
-    actor.require(Perm.STOCK_MANAGE)
+    require_catalog(actor)
     sku = sku.strip().lower()
     if not sku or " " in sku or len(sku) > 64:
         raise ValidationError("Артикул - одно слово до 64 символов")

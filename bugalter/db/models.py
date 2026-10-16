@@ -334,6 +334,10 @@ class WorkEntry(Base):
     cancel_reason: Mapped[str | None] = mapped_column(Text)
     chat_id: Mapped[int | None] = mapped_column(BigInteger)
     message_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Что указал сотрудник в отчёте «Крам факт 0.5 13»: товар, штук, вес одной штуки (для статистики).
+    product_name: Mapped[str | None] = mapped_column(String(120), index=True)
+    pieces: Mapped[Decimal | None] = mapped_column(QTY)
+    piece_weight: Mapped[Decimal | None] = mapped_column(QTY)
 
     @property
     def number(self) -> str:
@@ -851,3 +855,21 @@ class FsmState(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class Expense(Base):
+    """Расход компании: реклама, сотрудничество, аренда и т. п. Удаляется пометкой, чтобы было видно, кто."""
+
+    __tablename__ = "expenses"
+    __table_args__ = (CheckConstraint("amount > 0", name="amount_positive"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    currency: Mapped[str] = mapped_column(ForeignKey("currencies.code"), nullable=False)
+    spent_on: Mapped[dt.date] = mapped_column(Date, nullable=False, index=True)
+    comment: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[dt.datetime] = _now_col()
+    deleted_by: Mapped[int | None] = _user_fk()
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))

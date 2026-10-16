@@ -185,6 +185,9 @@ async def create_entry(
     chat_id: int | None = None,
     coefficient_codes: list[str] | None = None,
     self_report: bool = False,
+    product_name: str | None = None,
+    pieces: Decimal | None = None,
+    piece_weight: Decimal | None = None,
 ) -> EntryResult:
     """Создаёт операцию. Повтор с тем же idempotency_key возвращает уже созданную запись.
 
@@ -254,6 +257,9 @@ async def create_entry(
             created_by=actor.user.id,
             submitted_at=now if submit else None,
             chat_id=chat_id,
+            product_name=(product_name or None),
+            pieces=pieces,
+            piece_weight=piece_weight,
         )
         .on_conflict_do_nothing(index_elements=["idempotency_key"])
         .returning(WorkEntry.id)
