@@ -13,8 +13,9 @@ from decimal import Decimal
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import select
 
-from ...db.models import Employee, Unit, User, WorkEntry, WorkType
+from ...db.models import Employee, StockDocument, Unit, User, WorkEntry, WorkType
 from ...domain.dates import parse_date
 from ...domain.errors import AccessDenied, ValidationError
 from ...domain.money import fmt_number, fmt_qty, parse_decimal
@@ -75,18 +76,28 @@ async def report_card(session, entries: list[WorkEntry], show_amount: bool, unkn
 
 
 def report_kb(chat_id: int, message_id: int, entries: list[WorkEntry]) -> InlineKeyboardMarkup | None:
-    if not any(e.status == "pending" for e in entries):
-        return None
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Подтвердить", callback_data=f"tb:c:{chat_id}:{message_id}")
-    kb.button(text="❌ Отклонить", callback_data=f"tb:r:{chat_id}:{message_id}")
-    kb.adjust(2)
+    if any(e.status == "pending" for e in entries):
+        kb.button(text="✅ Подтвердить", callback_data=f"tb:c:{chat_id}:{message_id}")
+        kb.button(text="❌ Отклонить", callback_data=f"tb:r:{chat_id}:{message_id}")
+        # Сотрудник ошибся и отправил не то: сам удаляет, пока не подтвердили.
+        kb.button(text="🗑 Ошибся, удалить", callback_data=f"tb:x:{chat_id}:{message_id}")
+        kb.adjust(2, 1)
+    elif any(e.status == "confirmed" for e in entries):
+        # Подтвердили по ошибке: отменяет руководитель или владелец, деньги снимаются сторно.
+        kb.button(text="↩️ Отменить подтверждение", callback_data=f"tb:u:{chat_id}:{message_id}")
+    else:
+        return None
     return kb.as_markup()
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.text.regexp(r"^\s*#\w"))
 async def tag_report(message: Message, session, actor, settings, chat_dept, chat_employee, notifier):
     if chat_dept is None:
+        return
+    first, _, rest = message.text.strip().partition("\n")
+    if first.split()[0].lower() in ACCEPT_COMMANDS:
+        await _goods_preview(message, rest, session, actor, chat_dept, chat_employee, notifier)
         return
     # «#фасовка крам 1 40»: работа, товар, вес, штук. Если так не читается, то старый вид «#доставка 3».
     known = await _known(session)
@@ -111,43 +122,55 @@ async def block_report(message: Message, session, actor, settings, chat_dept, ch
     report = parse_block_report(message.text, known)
     if any(item.tag in known for item in report.items):
         await _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier)
-        return
-    await _goods_card(message, session, actor, chat_dept, chat_employee, notifier)
 
 
-# ------------------------------------------------------------------ сдача готового товара
+# ------------------------------------------------------------------ приём готового товара оператором
+
+# Первая строка сообщения оператора; дальше список «Крам 05 13». Сотрудник так не пишет, бот реагирует
+# только на эту команду и только от того, у кого есть право на склад.
+ACCEPT_COMMANDS = {"#принял", "#приём", "#прием", "#принято"}
+
+_GOODS_LINE = re.compile(r"^• (.+) × (\d+(?:[.,]\d+)?) шт$")
 
 
-async def _goods_card(message, session, actor, chat_dept, chat_employee, notifier):
-    """Сотрудник перечислил готовый товар: «Крам 05 13». Оператор проверяет и принимает на склад кнопкой."""
-    lines, other = parse_goods_list(message.text)
+async def _goods_preview(message, text, session, actor, chat_dept, chat_employee, notifier):
+    """Оператор написал «#принял» и список. Сначала показываем, что поняли, и записываем только по кнопке."""
+    if not actor.can(Perm.STOCK_OPERATE, chat_dept.id):
+        return  # не оператор: молчим
+    if chat_employee is None:
+        raise ValidationError("#принял пишите в группе сотрудника, тогда понятно, от кого товар")
+    if actor.is_self(chat_employee.id):
+        raise AccessDenied("Свой товар на склад принимает другой человек")
+    lines, other = parse_goods_list(text)
     if not lines:
-        return
+        raise ValidationError(
+            "После #принял с новой строки перечислите товар, вес и сколько штук:\n#принял\nКрам 05 13\nКрам 1 7"
+        )
     resolved = [(line, await stock.resolve_finished(session, line.name, line.weight)) for line in lines]
-    goods = [(line, g) for line, g in resolved if g is not None]
-    if not goods:
-        return  # обычная переписка с числами
-    employee = await _reporter(session, actor, chat_dept, chat_employee)
-    text = [f"📦 <b>{h(employee.full_name)} сдаёт на склад:</b>"]
+    unknown = [line.text for line, g in resolved if g is None] + other
+    if unknown:
+        raise ValidationError(
+            "Не понял: " + "; ".join(unknown) + ". Товар должен быть в списке Товары (Управление, Ещё, Товары). "
+            "Исправьте и отправьте заново, ничего не записано"
+        )
+    out = [f"📦 <b>Принять от {h(chat_employee.full_name)}:</b>"]
     new = []
-    for line, g in goods:
-        text.append(f"• {h(g.title)} × {h(line.qty)} шт")
+    for line, g in resolved:
+        out.append(f"• {h(g.title)} × {h(line.qty)} шт")
         if g.product is None:
             new.append(g.title)
     if new:
-        text.append("🆕 Новый товар заведётся сам: " + ", ".join(h(t) for t in new))
-    unknown = [line.text for line, g in resolved if g is None] + other
-    if unknown:
-        text.append("❓ Не понял: " + "; ".join(h(t) for t in unknown) + ". Товар должен быть в списке Товары.")
-    text.append("Оператор: пересчитайте и нажмите Принять. Если не сходится, Не принято и внесите вручную в Складе.")
+        out.append("🆕 Новый товар заведётся сам: " + ", ".join(h(t) for t in new))
+    out.append("Проверьте. Пока не нажали Записать, ничего не записано.")
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Принять на склад", callback_data=f"fg:a:{employee.id}")
-    kb.button(text="❌ Не принято", callback_data=f"fg:r:{employee.id}")
+    kb.button(text="✅ Записать на склад", callback_data=f"fg:a:{chat_employee.id}")
+    kb.button(text="✖️ Отмена", callback_data=f"fg:r:{chat_employee.id}")
     kb.adjust(2)
-    notifier.answer(message, "\n".join(text), kb.as_markup())
+    notifier.answer(message, "\n".join(out), kb.as_markup())
 
 
-_GOODS_LINE = re.compile(r"^• (.+) × (\d+(?:[.,]\d+)?) шт$")
+def _head(callback) -> str:
+    return callback.message.html_text.split("\nПроверьте.")[0].split("\n✅ Записано")[0]
 
 
 @router.callback_query(F.data.startswith("fg:"))
@@ -162,14 +185,22 @@ async def goods_action(callback: CallbackQuery, session, actor, settings, chat_d
         raise AccessDenied("Принимает на склад оператор или кладовщик")
     if actor.is_self(employee.id):
         raise AccessDenied("Свой товар на склад принимает другой человек")
-    items = [m.groups() for m in map(_GOODS_LINE.match, callback.message.text.splitlines()) if m]
     who = await ui.actor_label(session, actor.user.id)
-    head = callback.message.html_text.split("\nОператор:")[0]
+    head = _head(callback)
+    key = f"fg:{callback.message.chat.id}:{callback.message.message_id}"
     if action == "r":
-        notifier.edit(callback.message, head + f"\n❌ Не принято ({h(who)})")
-        notifier.toast(callback, "Отмечено: не принято")
+        notifier.edit(callback.message, head + f"\n✖️ Отменено ({h(who)}), ничего не записано")
+        notifier.toast(callback, "Отменено")
         return
-    lines = []
+    if action == "u":
+        await _undo_goods(session, actor, dept, employee, key)
+        notifier.edit(callback.message, head + f"\n↩️ Приём отменён ({h(who)}), товар снят со склада")
+        notifier.toast(callback, "Приём отменён")
+        if employee.user_id:
+            user = await session.get(User, employee.user_id)
+            notifier.send(user.telegram_id, "↩️ Приём товара отменён:\n" + head.split("\n", 1)[-1])
+        return
+    items = [m.groups() for m in map(_GOODS_LINE.match, callback.message.text.splitlines()) if m]
     for index, (title, qty) in enumerate(items):
         name, _, weight = title.rpartition(" ")
         goods = await stock.resolve_finished(session, name, weight) if name else None
@@ -178,10 +209,10 @@ async def goods_action(callback: CallbackQuery, session, actor, settings, chat_d
         if goods is None:
             continue
         product = await stock.ensure_finished(session, actor, goods, dept.id)
-        result = await stock.receive(
+        await stock.receive(
             session,
             actor,
-            key=f"fg:{callback.message.chat.id}:{callback.message.message_id}:{index}",
+            key=f"{key}:{index}",
             department=dept,
             product=product,
             qty=parse_decimal(qty, what="количество"),
@@ -189,12 +220,39 @@ async def goods_action(callback: CallbackQuery, session, actor, settings, chat_d
             comment=f"готовое от {employee.full_name}",
             received_on=settings.today(),
         )
-        lines.append(await ui.stock_doc_card(session, result.document))
-    notifier.edit(callback.message, head + f"\n✅ Принято на склад ({h(who)})")
-    notifier.toast(callback, "Принято на склад")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="↩️ Отменить приём (ошибка)", callback_data=f"fg:u:{employee.id}")
+    notifier.edit(callback.message, head + f"\n✅ Записано на склад ({h(who)})", kb.as_markup())
+    notifier.toast(callback, "Записано на склад")
     if employee.user_id:
         user = await session.get(User, employee.user_id)
         notifier.send(user.telegram_id, "📦 Склад принял у вас:\n" + head.split("\n", 1)[-1])
+
+
+async def _undo_goods(session, actor, dept, employee, key: str) -> None:
+    """Ошибочный приём: списываем те же количества со склада. История остаётся, видно и приём, и отмену."""
+    docs = (
+        (
+            await session.execute(
+                select(StockDocument).where(StockDocument.idempotency_key.like(f"{key}:%")).order_by(StockDocument.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not docs:
+        raise ValidationError("Нечего отменять")
+    for doc in docs:
+        for line, product in await stock.document_lines(session, doc.id):
+            await stock.write_off(
+                session,
+                actor,
+                key=f"undo:{doc.idempotency_key}",
+                department=dept,
+                product=product,
+                qty=line.qty_base,
+                reason=f"отмена ошибочного приёма {doc.number} от {employee.full_name}",
+            )
 
 
 async def _save_report(message, report, session, actor, settings, chat_dept, chat_employee, notifier):
@@ -262,21 +320,37 @@ async def report_action(callback: CallbackQuery, session, actor, settings, notif
         return
     changed = False
     for entry in entries:
+        if action == "u":
+            if entry.status == "confirmed":
+                await work.cancel_entry(session, actor, settings, entry.id, "подтверждено по ошибке")
+                changed = True
+            continue
         if entry.status != "pending":
             continue
         if action == "c":
             _, _, done = await work.confirm_entry(session, actor, settings, entry.id)
             changed = changed or done
+        elif action == "x":
+            if not (actor.is_self(entry.employee_id) or entry.created_by == actor.user.id):
+                raise AccessDenied("Удалить может тот, кто отправил. Оператор нажимает Отклонить")
+            await work.cancel_entry(session, actor, settings, entry.id, "сотрудник ошибся")
+            changed = True
         else:
             await work.reject_entry(session, actor, settings, entry.id, None)
             changed = True
     entries = await work.entries_by_key_prefix(session, f"tag:{chat_id}:{message_id}:")
-    notifier.toast(callback, ("Подтверждено, начислено" if action == "c" else "Отклонено") if changed else "Уже решено")
+    done_text = {"c": "Подтверждено, начислено", "r": "Отклонено", "x": "Удалено", "u": "Подтверждение отменено"}
+    notifier.toast(callback, done_text[action] if changed else "Уже решено")
     card = await report_card(session, entries, settings.group_show_amounts, [])
     notifier.edit(callback.message, card, report_kb(int(chat_id), int(message_id), entries))
     if changed:
         emp = await session.get(Employee, entries[0].employee_id)
         if emp.user_id and emp.user_id != actor.user.id:
             user = await session.get(User, emp.user_id)
-            verdict = "✅ Отчёт подтверждён" if action == "c" else "❌ Отчёт отклонён"
+            verdict = {
+                "c": "✅ Отчёт подтверждён",
+                "r": "❌ Отчёт отклонён",
+                "x": "🗑 Отчёт удалён",
+                "u": "↩️ Подтверждение отчёта отменено",
+            }[action]
             notifier.send(user.telegram_id, verdict + ":\n" + await report_card(session, entries, True, []))

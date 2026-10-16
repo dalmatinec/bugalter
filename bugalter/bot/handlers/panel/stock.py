@@ -364,7 +364,8 @@ async def finished_list(callback: CallbackQuery, state: FSMContext, session, not
 
 
 @form("st_list")
-async def form_st_list(message, state, session, actor, settings, notifier, data, **_):
+async def form_st_list(message, state, session, actor, notifier, data, **_):
+    """Список от оператора: сначала показываем, что поняли, записываем только по кнопке."""
     from ....domain.tags import parse_goods_list
 
     dept = await session.get(Department, data["dept_id"])
@@ -377,10 +378,39 @@ async def form_st_list(message, state, session, actor, settings, notifier, data,
         raise ValidationError(
             "Не понял строки: "
             + "; ".join(unknown or [message.text])
-            + ". Пишите товар, вес и количество: Крам 05 13. Товар должен быть в списке Товары"
+            + ". Пишите товар, вес и количество: Крам 05 13. Товар должен быть в списке Товары. "
+            "Ничего не записано, пришлите список заново"
         )
+    await state.update_data(goods=message.text)
+    preview = [f"• {h(g.title)} × {h(line.qty)} шт" for line, g in resolved]
+    notifier.answer(
+        message,
+        f"📦 Принять от <b>{h(emp.full_name)}</b>:\n"
+        + "\n".join(preview)
+        + "\n\nВсё верно? Пока не нажали, ничего не записано.",
+        kb(
+            [
+                [("✅ Записать на склад", f"p:st:fly:{dept.id}")],
+                [("✏️ Прислать заново", f"p:st:fl:{dept.id}:{emp.id}")],
+                [("✖️ Отмена", f"p:st:d:{dept.id}")],
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("p:st:fly:"))
+async def finished_list_save(callback: CallbackQuery, state: FSMContext, session, actor, settings, notifier):
+    from ....domain.tags import parse_goods_list
+
+    data = await state.get_data()
+    if data.get("form") != "st_list" or "goods" not in data:
+        raise ValidationError("Список уже записан или устарел. Начните заново: Склад, Принять готовое")
+    dept = await session.get(Department, data["dept_id"])
+    emp = await session.get(Employee, data["emp_id"])
+    lines, _ = parse_goods_list(data["goods"])
     done = []
-    for index, (line, goods) in enumerate(resolved):
+    for index, line in enumerate(lines):
+        goods = await stock.resolve_finished(session, line.name, line.weight)
         product = await stock.ensure_finished(session, actor, goods, dept.id)
         await stock.receive(
             session,
@@ -396,12 +426,11 @@ async def form_st_list(message, state, session, actor, settings, notifier, data,
         done.append(f"• {h(goods.title)} × {h(line.qty)} шт")
     await state.clear()
     await session.flush()
-    text = f"📦 Принято на склад от {h(emp.full_name)}:\n" + "\n".join(done)
     if emp.user_id:
         user = await session.get(User, emp.user_id)
         notifier.send(user.telegram_id, "📦 Склад принял у вас:\n" + "\n".join(done))
-    notifier.answer(message, text)
-    notifier.answer(message, *await stock_view(session, actor, dept.id))
+    text, markup = await stock_view(session, actor, dept.id)
+    show(callback, notifier, f"📦 Принято на склад от {h(emp.full_name)}:\n" + "\n".join(done) + "\n\n" + text, markup)
 
 
 @router.callback_query(F.data.startswith("p:st:fp:"))
@@ -482,10 +511,14 @@ STOCK_HELP = """❓ <b>Как работать со складом</b>
 Он пишет в своей группе, например <code>#фасовка крам 1 40</code> или <code>Крам факт 0.5 13</code>.
 Оператор подтверждает кнопкой, и деньги идут сотруднику в зарплату.
 
-<b>4. Сотрудник сдаёт готовое на склад</b>, чтобы покупатели могли забрать
-Сотрудник пишет в группе список: <code>Крам 05 13</code>, <code>Трюфель 1 17</code> (товар, вес, штук).
-Бот покажет карточку, оператор пересчитывает и нажимает ✅ Принять на склад.
-Или оператор сам: 📦 Принять готовое, сотрудник, 📋 Вставить списком.
+<b>4. Принять готовое на склад</b> (это делает оператор, не сотрудник)
+В группе сотрудника напишите:
+<code>#принял
+Крам 05 13
+Трюфель 1 17</code>
+Бот покажет, что понял. Проверьте и нажмите ✅ Записать на склад. До кнопки ничего не записано.
+Ошиблись после записи: ↩️ Отменить приём, товар снимется со склада.
+Или здесь: 📦 Принять готовое, сотрудник, 📋 Вставить списком.
 Готовый товар (Крам 0.5, Крам 1) заводится сам, если есть товар Крам.
 Сырьё, которое ушло на фасовку: ✂️ Израсходовано, тогда оно перестанет числиться на сотруднике.
 

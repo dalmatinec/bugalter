@@ -829,23 +829,68 @@ async def test_packing_tags_and_finished_goods(h, session):
     await h.press(OPERATOR, card.reply_markup.inline_keyboard[0][0].callback_data, GROUP)
     assert await ledger.balances(session, emp.id) == {"USD": Decimal("617.5000")}
 
-    out = await h.say(IVAN, "Крам 05 13\nКрам 1 7\nпривет", GROUP)
-    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
-    assert "сдаёт на склад" in card.text and "• Крам 0.5 × 13 шт" in card.text and "• Крам 1 × 7 шт" in card.text
-    assert "Новый товар заведётся сам" in card.text
-    accept = card.reply_markup.inline_keyboard[0][0].callback_data
-    await h.press(IVAN, accept, GROUP, text=card.text)
-    assert any("Принимает на склад" in a for a in h.tg.alerts())
+    # Сотрудник перечисляет товар: бот молчит, принимает только оператор
+    ivan_group = -100888
+    await org.bind_chat(session, owner, ivan_group, "Иван", dept, emp)
+    await session.commit()
+    assert texts(await h.say(IVAN, "Крам 05 13\nКрам 1 7", ivan_group)) == ""
+    assert texts(await h.say(IVAN, "#принял\nКрам 05 13", ivan_group)) == ""
 
-    # Оператор принимает кнопкой под карточкой
-    out = await h.press(OPERATOR, accept, GROUP, text=card.text)
+    # Оператор: сначала предпросмотр, ничего не записано
+    out = await h.say(OPERATOR, "#принял\nКрам 05 13\nКрам 1 7", ivan_group)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == ivan_group)
+    assert "Принять от Иван Иванов" in card.text and "• Крам 0.5 × 13 шт" in card.text
+    assert "ничего не записано" in card.text
+    assert await stock.get_product(session, "Крам 0.5", required=False) is None
+    # Ошибка в строке: ничего не записывается, бот объясняет
+    out = texts(await h.say(OPERATOR, "#принял\nКрем 05 13", ivan_group))
+    assert "Не понял: Крем 05 13" in out and "ничего не записано" in out
+
+    accept = card.reply_markup.inline_keyboard[0][0].callback_data
+    out = await h.press(OPERATOR, accept, ivan_group, text=card.text)
     assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "Склад принял" in c.text for c in out)
     half = await stock.get_product(session, "Крам 0.5")
     loc = await stock.location(session, "warehouse", dept.id)
     assert await stock.balance(session, loc.id, half.id) == Decimal(13)
+    edited = next(c for c in out if isinstance(c, EditMessageText))
+    undo = edited.reply_markup.inline_keyboard[0][0].callback_data
+    # Повторное нажатие Записать не задваивает
+    await h.press(OPERATOR, accept, ivan_group, text=card.text)
+    assert await stock.balance(session, loc.id, half.id) == Decimal(13)
+    # Ошибочный приём отменяется
+    await h.press(OPERATOR, undo, ivan_group, text=card.text)
+    assert await stock.balance(session, loc.id, half.id) == Decimal(0)
 
-    # Оператор вносит сам списком в Складе
+    # Оператор вносит сам списком в Складе: предпросмотр, потом кнопка
     await h.press(OPERATOR, f"p:st:fl:{dept.id}:{emp.id}")
     out = texts(await h.say(OPERATOR, "Крам 05 2\nКрам 1 1"))
+    assert "Всё верно?" in out and await stock.balance(session, loc.id, half.id) == Decimal(0)
+    out = texts(await h.press(OPERATOR, f"p:st:fly:{dept.id}"))
     assert "Принято на склад от Иван Иванов" in out
-    assert await stock.balance(session, loc.id, half.id) == Decimal(15)
+    assert await stock.balance(session, loc.id, half.id) == Decimal(2)
+    await h.press(OPERATOR, f"p:st:fly:{dept.id}")  # второй раз не записывает
+    assert await stock.balance(session, loc.id, half.id) == Decimal(2)
+
+
+async def test_report_mistakes_delete_and_undo(h, session):
+    """Сотрудник ошибся: удаляет сам до подтверждения. Подтвердили по ошибке: руководитель отменяет."""
+    dept, emp = await setup_company(h, session)
+    out = await h.say(IVAN, "#доставка 3", GROUP)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
+    delete = card.reply_markup.inline_keyboard[1][0].callback_data
+    assert delete.startswith("tb:x:")
+    await h.press(OPERATOR, delete, GROUP)  # оператор не удаляет чужое, он отклоняет
+    assert any("Удалить может тот, кто отправил" in a for a in h.tg.alerts())
+    out = await h.press(IVAN, delete, GROUP)
+    assert any("Удалено" in a for a in h.tg.alerts())
+    assert (await session.execute(select(WorkEntry))).scalar_one().status == "cancelled"
+
+    out = await h.say(IVAN, "#доставка 2", GROUP)
+    card = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == GROUP)
+    out = await h.press(OPERATOR, card.reply_markup.inline_keyboard[0][0].callback_data, GROUP)
+    assert await ledger.balances(session, emp.id) == {"USD": Decimal("800.0000")}
+    undo = next(c for c in out if isinstance(c, EditMessageText)).reply_markup.inline_keyboard[0][0].callback_data
+    await h.press(OPERATOR, undo, GROUP)  # у оператора нет права отменять проведённое
+    assert await ledger.balances(session, emp.id) == {"USD": Decimal("800.0000")}
+    await h.press(OWNER, undo, GROUP)
+    assert await ledger.balances(session, emp.id) == {"USD": Decimal("0.0000")}
