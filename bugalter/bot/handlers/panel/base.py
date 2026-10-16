@@ -25,6 +25,7 @@ ADMIN_PERMS = (
     Perm.SETTINGS_MANAGE,
     Perm.PAYROLL_SIGN,
     Perm.PAYROLL_PAYOUT,
+    Perm.STOCK_OPERATE,
 )
 
 

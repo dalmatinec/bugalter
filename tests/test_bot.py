@@ -404,7 +404,7 @@ async def test_admin_panel_simple_setup(h, session):
     out = await h.press(OWNER, "p:first:USD")
     markup = next(c.reply_markup for c in out if getattr(c, "reply_markup", None))
     labels = [b.text for row in markup.inline_keyboard for b in row]
-    assert labels == ["👥 Сотрудники", "💰 Работы и цены", "💸 Выплаты", "💬 Группы", "➕ Ещё"]
+    assert labels == ["👥 Сотрудники", "💰 Работы и цены", "💸 Выплаты", "📦 Склад", "💬 Группы", "➕ Ещё"]
     out = await h.say(OWNER, "⚙️ Управление")
     assert [b.text for row in out[-1].reply_markup.inline_keyboard for b in row] == labels
     dept = (await session.execute(select(Department))).scalar_one()  # создана автоматически
@@ -642,3 +642,45 @@ async def test_advance_request_accountant_then_owner(h, session):
     ask = next(c for c in out if isinstance(c, SendMessage) and c.chat_id == OWNER)
     out = await h.press(OWNER, ask.reply_markup.inline_keyboard[0][1].callback_data)
     assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "отклонена" in c.text for c in out)
+
+
+async def test_stock_panel_buttons(h, session):
+    """Склад кнопками: приход, выдача сотруднику, подтверждение, возврат, остатки по людям."""
+    dept, emp = await setup_company(h, session)
+    coffee = await stock.get_product(session, "coffee")
+    out = texts(await h.press(OWNER, "p:st"))
+    assert "Движений пока нет" in out
+
+    await h.press(OWNER, f"p:st:ip:{dept.id}:{coffee.id}")
+    out = texts(await h.say(OWNER, "50 5000"))
+    assert "Приход записан" in out and "на складе: <b>50 кг</b>" in out
+
+    await h.press(OWNER, f"p:st:op:{dept.id}:{emp.id}:{coffee.id}")
+    out = await h.say(OWNER, "8 уп")  # 8 упаковок по 0,25 кг
+    assert any(isinstance(c, SendMessage) and c.chat_id == IVAN and "Подтвердите получение" in c.text for c in out)
+    assert "ждёт подтверждения: 2 кг" in texts(out)
+    doc = (await session.execute(select(StockDocument).where(StockDocument.doc_type == "issue"))).scalar_one()
+    await h.press(IVAN, f"sd:a:{doc.id}")
+
+    out = texts(await h.press(OWNER, f"p:st:d:{dept.id}"))
+    assert "пришло 50 · выдано 2 · вернули 0 кг" in out
+    assert "на складе: <b>48 кг</b>" in out and "Иван Иванов: 2 кг" in out
+
+    await h.press(OWNER, f"p:st:rp:{dept.id}:{emp.id}:{coffee.id}")
+    out = texts(await h.say(OWNER, "0.5"))
+    assert "Возврат записан" in out and "Иван Иванов: 1,5 кг" in out and "на складе: <b>48,5 кг</b>" in out
+    out = texts(await h.press(OWNER, f"p:st:log:{dept.id}"))
+    assert "Выдача сотруднику · Иван Иванов" in out
+
+    # Работнику без прав склад не открывается
+    await h.press(IVAN, "p:st")
+    assert any("Склад доступен" in a for a in h.tg.alerts())
+
+
+async def test_product_pack_excludes_base_unit(h, session):
+    await setup_company(h, session)
+    coffee = await stock.get_product(session, "coffee")
+    out = await h.press(OWNER, f"p:pr:pk:{coffee.id}")
+    markup = next(c.reply_markup for c in out if isinstance(c, EditMessageText))
+    codes = [b.text for row in markup.inline_keyboard for b in row]
+    assert "кг" not in codes and "уп" not in codes and "кор" in codes

@@ -14,6 +14,9 @@ from .base import ask, cancel_kb, form, kb, rate_text, show
 
 router = Router(name="panel.products")
 
+# В чём считать товар на складе и как называть упаковку. Единицы для работ (заказ, час) здесь не нужны.
+STOCK_UNITS = ("шт", "кг", "г", "л", "уп", "кор", "мешок", "пачка")
+
 
 async def products_view(session):
     lines = ["📦 <b>Товары</b>", ""]
@@ -64,10 +67,20 @@ async def product_add(callback: CallbackQuery, state: FSMContext, actor, notifie
 async def form_product_name(message, state, session, notifier, **_):
     name = " ".join(message.text.split())
     await state.update_data(product_name=name)
-    units = [(f"{u.code}", f"p:pr:u:{u.code}") for u in await reference.list_units(session)]
-    grid = [units[i : i + 3] for i in range(0, len(units), 3)]
+    units = [(code, f"p:pr:u:{code}") for code in await _stock_units(session)]
+    grid = [units[i : i + 4] for i in range(0, len(units), 4)]
     grid.append([("✖️ Отмена", "p:pr")])
-    notifier.answer(message, f"{h(name)}: в чём ведём учёт на складе?", kb(grid))
+    notifier.answer(
+        message,
+        f"{h(name)}: в чём считать остаток на складе? Например кофе в кг или г, бутылки в шт.\n"
+        "Упаковку (уп, коробку) можно добавить потом кнопкой Фасовка.",
+        kb(grid),
+    )
+
+
+async def _stock_units(session) -> list[str]:
+    known = {u.code for u in await reference.list_units(session)}
+    return [code for code in STOCK_UNITS if code in known]
 
 
 @router.callback_query(F.data.startswith("p:pr:u:"))
@@ -86,10 +99,19 @@ async def product_unit_choice(callback: CallbackQuery, state: FSMContext, sessio
 @router.callback_query(F.data.startswith("p:pr:pk:"))
 async def product_pack(callback: CallbackQuery, session, notifier):
     product_id = int(callback.data.split(":")[3])
-    units = [(u.code, f"p:pr:pu:{product_id}:{u.code}") for u in await reference.list_units(session)]
-    grid = [units[i : i + 3] for i in range(0, len(units), 3)]
+    product = await session.get(Product, product_id)
+    have = {u.unit_code for u in dict(await stock.list_products(session)).get(product, [])}
+    codes = [c for c in await _stock_units(session) if c != product.base_unit and c not in have]
+    units = [(code, f"p:pr:pu:{product_id}:{code}") for code in codes]
+    grid = [units[i : i + 4] for i in range(0, len(units), 4)]
     grid.append([("⬅️ Назад", f"p:pr:v:{product_id}")])
-    show(callback, notifier, "Как называется фасовка?", kb(grid))
+    show(
+        callback,
+        notifier,
+        f"Фасовка: упаковка, в которой {h(product.name)} приходит или выдаётся. Тогда можно писать "
+        f"не 750 {h(product.base_unit)}, а 3 уп.\nКак называется упаковка?",
+        kb(grid),
+    )
 
 
 @router.callback_query(F.data.startswith("p:pr:pu:"))
@@ -100,7 +122,8 @@ async def product_pack_unit(callback: CallbackQuery, state: FSMContext, session,
     show(
         callback,
         notifier,
-        f"Сколько {h(product.base_unit)} в 1 {h(unit)}? Например <b>0.25</b>",
+        f"Сколько {h(product.base_unit)} в 1 {h(unit)}? Например, если в упаковке 250 {h(product.base_unit)}, "
+        "напишите <b>250</b>",
         cancel_kb(f"p:pr:v:{product.id}"),
     )
 

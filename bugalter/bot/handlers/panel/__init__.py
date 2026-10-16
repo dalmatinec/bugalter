@@ -18,6 +18,7 @@ from . import (
     payouts,
     products,
     settings,
+    stock,
     works,
 )
 from .base import can_admin
@@ -33,6 +34,7 @@ router.include_routers(
     works.router,
     coefficients.router,
     products.router,
+    stock.router,
     groups.router,
     settings.router,
     backups.router,
